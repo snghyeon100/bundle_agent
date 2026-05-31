@@ -1,4 +1,4 @@
-﻿# API keys and local environment
+# API keys and local environment
 .env
 
 # Python environments
@@ -15,8 +15,7 @@ __pycache__/
 # Local outputs and datasets
 results/**
 !results/.gitkeep
-datasets/**
-!datasets/.gitkeep
+datasets/
 
 # IDE and OS files
 .vscode/

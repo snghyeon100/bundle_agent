@@ -1,6 +1,6 @@
-﻿# Dataset
+# Dataset
 dataset: pog_dense          # pog | pog_dense | spotify | spotify_sparse
-data_path: ../LLM-ZeroShot/datasets
+data_path: ./datasets
 
 # Evaluation
 num_cans: 10                # number of candidates including the answer
@@ -15,5 +15,5 @@ temperature: 0.0
 max_output_tokens: 10
 
 # Execution
-max_concurrent: 10
+max_concurrent: 1
 output_dir: ./results
