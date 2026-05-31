@@ -122,28 +122,26 @@ def generate_prompt(dataset_name, input_str, target_str):
 
 def generate_candidate_reasoning_prompt(dataset_name, input_str, candidate_letter, candidate_text):
     if "spotify" in dataset_name:
+        task_name = "playlist continuation"
         bundle_name = "music playlist"
-        item_name = "song"
         criteria = (
-            "Consider whether the song fits the playlist theme, mood, genre, artist/album context, "
-            "and listening flow suggested by the input songs."
+            "Discuss whether this playlist feels coherent in theme, mood, genre, artist or album context, "
+            "and listening flow."
         )
     else:
+        task_name = "bundle construction"
         bundle_name = "fashion outfit"
-        item_name = "fashion item"
         criteria = (
-            "Consider whether the item fits the outfit concept, seasonality, style, color/material harmony, "
-            "and category compatibility suggested by the input items."
+            "Discuss whether this outfit feels coherent in concept, seasonality, style, color or material harmony, "
+            "and item-category compatibility."
         )
 
+    completed_bundle = f"{input_str}; {candidate_text}"
     return (
-        f"You are evaluating one candidate {item_name} for {bundle_name} completion.\n"
-        f"Partial {bundle_name}: {input_str}\n"
-        f"Candidate {candidate_letter}: {candidate_text}\n"
-        f"Think about whether adding Candidate {candidate_letter} to the partial {bundle_name} "
-        f"would form a coherent completed {bundle_name}. {criteria}\n"
-        f"Do not compare it with other candidates. Do not choose a final answer. "
-        f"Write only a concise reasoning paragraph in English.\nReasoning: "
+        f"You are a {task_name} analyst.\n"
+        f"Review the following completed {bundle_name}: {completed_bundle}\n"
+        f"For this {bundle_name}, provide reasoning about how well the items work together. {criteria}\n"
+        f"Write only a concise reasoning paragraph in English. Do not choose an answer.\nReasoning: "
     )
 
 
@@ -171,6 +169,12 @@ def generate_prediction_from_reasoning_prompt(dataset_name, input_str, target_st
         f"Candidate-wise reasoning:\n{reasoning_block}\n"
         f"Your answer should indicate your choice with a single letter (e.g., \"A,\" \"B,\" \"C,\" etc.).\nChoice: "
     )
+
+
+def print_llm_prompt_debug(title, prompt):
+    print(f"\n[DEBUG] {title}:")
+    print(console_safe_text(prompt))
+    print("-" * 50 + "\n")
 
 
 def print_first_qa_debug(sample, prompt):
@@ -249,6 +253,11 @@ async def process_samples(client, samples, conf, timestamp, initial_results=None
                     reasoning_prompt = generate_candidate_reasoning_prompt(
                         conf["dataset"], sample["input_str"], candidate_letter, candidate_text
                     )
+                    if current_idx == start_idx:
+                        print_llm_prompt_debug(
+                            f"First Candidate Reasoning Prompt {len(candidate_reasonings) + 1} Sent To Model",
+                            reasoning_prompt,
+                        )
                     try:
                         reasoning_text = await generate_content_with_retry(
                             client,
