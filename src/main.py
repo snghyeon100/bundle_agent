@@ -163,7 +163,7 @@ def generate_candidate_reasoning_prompt(dataset_name, input_str, candidate_optio
         f"Review the following completed {bundle_name}s. Each line appends one possible final item to the same input items.\n"
         f"{completed_bundle_block}\n"
         f"For each completed {bundle_name}, provide reasoning about how well the items work together. {criteria}\n"
-        f"Write only concise reasoning in English. Do not choose an answer.\n"
+        f"Write only concise reasoning in English. Use 2-3 sentences for each label. Do not choose an answer.\n"
         f"Return exactly one reasoning paragraph for each label ({letters}) using this format:\n"
         f"A: reasoning text\nB: reasoning text\n...\nReasoning:\n"
     )
