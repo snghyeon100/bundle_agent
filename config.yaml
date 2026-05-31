@@ -13,6 +13,8 @@ shuffle_seed: 41            # seed for input item order
 model: gemini-3.1-flash-lite
 temperature: 0.0
 max_output_tokens: 10
+use_candidate_reasoning: false
+candidate_reasoning_max_output_tokens: 220
 
 # Execution
 max_concurrent: 1

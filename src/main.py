@@ -1,4 +1,4 @@
-﻿import argparse
+import argparse
 import asyncio
 import os
 import re
@@ -30,6 +30,15 @@ def console_safe_text(text):
     return str(text).encode(encoding, errors="backslashreplace").decode(encoding)
 
 
+def use_candidate_reasoning(conf):
+    return bool(conf.get("use_candidate_reasoning", False))
+
+
+def parse_candidate_options(target_str):
+    pattern = r"([A-Z])\. (.*?)(?=; [A-Z]\. |$)"
+    return [(letter, text.strip()) for letter, text in re.findall(pattern, target_str)]
+
+
 def generate_prompt(dataset_name, input_str, target_str):
     if "spotify" in dataset_name:
         task_name = "playlist continuation"
@@ -47,6 +56,59 @@ def generate_prompt(dataset_name, input_str, target_str):
         f"Question: Given the partial {bundle_name}: {input_str}, "
         f"which candidate {item_name} should be included into this {bundle_name}?\n"
         f"Options: {target_str}\n"
+        f"Your answer should indicate your choice with a single letter (e.g., \"A,\" \"B,\" \"C,\" etc.).\nChoice: "
+    )
+
+
+def generate_candidate_reasoning_prompt(dataset_name, input_str, candidate_letter, candidate_text):
+    if "spotify" in dataset_name:
+        bundle_name = "music playlist"
+        item_name = "song"
+        criteria = (
+            "Consider whether the song fits the playlist theme, mood, genre, artist/album context, "
+            "and listening flow suggested by the input songs."
+        )
+    else:
+        bundle_name = "fashion outfit"
+        item_name = "fashion item"
+        criteria = (
+            "Consider whether the item fits the outfit concept, seasonality, style, color/material harmony, "
+            "and category compatibility suggested by the input items."
+        )
+
+    return (
+        f"You are evaluating one candidate {item_name} for {bundle_name} completion.\n"
+        f"Partial {bundle_name}: {input_str}\n"
+        f"Candidate {candidate_letter}: {candidate_text}\n"
+        f"Think about whether adding Candidate {candidate_letter} to the partial {bundle_name} "
+        f"would form a coherent completed {bundle_name}. {criteria}\n"
+        f"Do not compare it with other candidates. Do not choose a final answer. "
+        f"Write only a concise reasoning paragraph in English.\nReasoning: "
+    )
+
+
+def generate_prediction_from_reasoning_prompt(dataset_name, input_str, target_str, candidate_reasonings):
+    if "spotify" in dataset_name:
+        task_name = "playlist continuation"
+        bundle_name = "music playlist"
+        item_name = "song"
+    else:
+        task_name = "bundle construction"
+        bundle_name = "fashion outfit"
+        item_name = "fashion item"
+
+    reasoning_block = "\n".join(
+        f"Candidate {letter} reasoning: {reasoning}"
+        for letter, reasoning in candidate_reasonings
+    )
+    return (
+        f"You are a helpful and honest assistant. The following are multiple choice questions about {task_name}. "
+        f"You should directly answer the question by choosing the letter of the correct option. "
+        f"Only provide the letter of your answer, without any explanation or mentioning the option content.\n"
+        f"Question: Given the partial {bundle_name}: {input_str}, "
+        f"which candidate {item_name} should be included into this {bundle_name}?\n"
+        f"Options: {target_str}\n"
+        f"Candidate-wise reasoning:\n{reasoning_block}\n"
         f"Your answer should indicate your choice with a single letter (e.g., \"A,\" \"B,\" \"C,\" etc.).\nChoice: "
     )
 
@@ -70,8 +132,9 @@ def result_path(conf, timestamp, partial=False):
     output_dir = os.path.join(conf["output_dir"], conf["dataset"])
     os.makedirs(output_dir, exist_ok=True)
     suffix = "_partial" if partial else ""
+    method_name = "candidate_reasoning" if use_candidate_reasoning(conf) else "baseline"
     filename = (
-        f"results_{conf['dataset']}_baseline_"
+        f"results_{conf['dataset']}_{method_name}_"
         f"C{conf.get('num_cans', '')}_T{conf.get('num_token', '')}_"
         f"{timestamp}{suffix}.csv"
     )
@@ -98,6 +161,8 @@ def save_results(results, conf, timestamp, partial=False):
         df["cfg_shuffle_seed"] = conf.get("shuffle_seed", "")
         df["cfg_model"] = conf.get("model", "")
         df["cfg_temperature"] = conf.get("temperature", "")
+        df["cfg_use_candidate_reasoning"] = use_candidate_reasoning(conf)
+        df["cfg_candidate_reasoning_max_output_tokens"] = conf.get("candidate_reasoning_max_output_tokens", "")
 
     path = result_path(conf, timestamp, partial=partial)
     df.to_csv(path, index=False, encoding="utf-8-sig")
@@ -111,27 +176,72 @@ async def process_samples(client, samples, conf, timestamp, initial_results=None
     total = start_idx + len(samples)
 
     async def run_one(sample, current_idx):
-        prompt = generate_prompt(conf["dataset"], sample["input_str"], sample["target_str"])
-        if current_idx == start_idx:
-            print_first_qa_debug(sample, prompt)
-
-        async with semaphore:
-            try:
-                response = await client.aio.models.generate_content(
-                    model=conf["model"],
-                    contents=prompt,
-                    config={
-                        "temperature": float(conf.get("temperature", 0.0)),
-                        "max_output_tokens": int(conf.get("max_output_tokens", 10)),
-                    },
-                )
-                raw_text = response.text or ""
-                prediction = parse_model_response(raw_text)
-            except Exception as exc:
-                raw_text = str(exc)
-                prediction = "ERR_EX"
-
         row = dict(sample)
+        prompt = generate_prompt(conf["dataset"], sample["input_str"], sample["target_str"])
+
+        if use_candidate_reasoning(conf):
+            candidate_reasonings = []
+            options = parse_candidate_options(sample["target_str"])
+            async with semaphore:
+                for candidate_letter, candidate_text in options:
+                    reasoning_prompt = generate_candidate_reasoning_prompt(
+                        conf["dataset"], sample["input_str"], candidate_letter, candidate_text
+                    )
+                    try:
+                        response = await client.aio.models.generate_content(
+                            model=conf["model"],
+                            contents=reasoning_prompt,
+                            config={
+                                "temperature": float(conf.get("temperature", 0.0)),
+                                "max_output_tokens": int(conf.get("candidate_reasoning_max_output_tokens", 220)),
+                            },
+                        )
+                        reasoning_text = response.text or ""
+                    except Exception as exc:
+                        reasoning_text = str(exc)
+                    candidate_reasonings.append((candidate_letter, reasoning_text))
+                    row[f"reasoning_{candidate_letter}"] = reasoning_text
+
+                prompt = generate_prediction_from_reasoning_prompt(
+                    conf["dataset"], sample["input_str"], sample["target_str"], candidate_reasonings
+                )
+                if current_idx == start_idx:
+                    print_first_qa_debug(sample, prompt)
+
+                try:
+                    response = await client.aio.models.generate_content(
+                        model=conf["model"],
+                        contents=prompt,
+                        config={
+                            "temperature": float(conf.get("temperature", 0.0)),
+                            "max_output_tokens": int(conf.get("max_output_tokens", 10)),
+                        },
+                    )
+                    raw_text = response.text or ""
+                    prediction = parse_model_response(raw_text)
+                except Exception as exc:
+                    raw_text = str(exc)
+                    prediction = "ERR_EX"
+        else:
+            if current_idx == start_idx:
+                print_first_qa_debug(sample, prompt)
+
+            async with semaphore:
+                try:
+                    response = await client.aio.models.generate_content(
+                        model=conf["model"],
+                        contents=prompt,
+                        config={
+                            "temperature": float(conf.get("temperature", 0.0)),
+                            "max_output_tokens": int(conf.get("max_output_tokens", 10)),
+                        },
+                    )
+                    raw_text = response.text or ""
+                    prediction = parse_model_response(raw_text)
+                except Exception as exc:
+                    raw_text = str(exc)
+                    prediction = "ERR_EX"
+
         row["prediction"] = prediction
         row["raw_response"] = raw_text
         row["hit"] = int(prediction == sample["true_option_char"])
@@ -216,4 +326,3 @@ def main():
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

@@ -1,8 +1,8 @@
-﻿# Bundle Agent
+# Bundle Agent
 
 Minimal zero-shot bundle completion baseline.
 
-This repo intentionally keeps only the baseline method:
+This repo keeps the baseline method as the default:
 
 - text-only prompt
 - multiple-choice prediction
@@ -19,4 +19,10 @@ pip install -r requirements.txt
 python src/main.py --config config.yaml
 ```
 
-The default `data_path` points to `../LLM-ZeroShot/datasets` so this repo can reuse the existing local datasets without committing them.
+The default `data_path` points to `./datasets`, which is ignored by Git because the dataset and embedding files are large.
+
+## Candidate Reasoning Method
+
+Set `use_candidate_reasoning: true` in `config.yaml` to use the two-step `candidate_reasoning` method. The first step asks the model to write pure English reasoning for each candidate independently. The second step passes those ten reasoning outputs back to the model and asks for the final single-letter prediction.
+
+When disabled, the code runs the original baseline prompt directly.
