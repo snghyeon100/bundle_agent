@@ -41,13 +41,13 @@ def generate_prompt(dataset_name, input_str, target_str):
         item_name = "fashion item"
 
     return (
-        f"You are a helpful and honest assistant. The following is a multiple choice question "
-        f"about {task_name}. Choose the letter of the correct option. "
-        f"Only provide the answer letter, without explanation or option content.\n"
+        f"You are a helpful and honest assistant. The following are multiple choice questions about {task_name}. "
+        f"You should directly answer the question by choosing the letter of the correct option. "
+        f"Only provide the letter of your answer, without any explanation or mentioning the option content.\n"
         f"Question: Given the partial {bundle_name}: {input_str}, "
         f"which candidate {item_name} should be included into this {bundle_name}?\n"
         f"Options: {target_str}\n"
-        f"Answer: "
+        f"Your answer should indicate your choice with a single letter (e.g., \"A,\" \"B,\" \"C,\" etc.).\nChoice: "
     )
 
 
@@ -216,3 +216,4 @@ def main():
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
