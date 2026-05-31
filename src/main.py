@@ -38,6 +38,21 @@ def use_candidate_reasoning(conf):
     return bool(conf.get("use_candidate_reasoning", False))
 
 
+def resolve_api_key(conf, config_key, fallback_envs):
+    env_name = str(conf.get(config_key, "")).strip()
+    if env_name:
+        api_key = os.getenv(env_name, "").strip()
+        if not api_key:
+            raise ValueError(f"API key environment variable is not set: {env_name}")
+        return api_key, env_name
+
+    for fallback_env in fallback_envs:
+        api_key = os.getenv(fallback_env, "").strip()
+        if api_key:
+            return api_key, fallback_env
+    raise ValueError(f"None of these API key environment variables are set: {', '.join(fallback_envs)}")
+
+
 def parse_candidate_options(target_str):
     pattern = r"(?:^|;\s*)([A-Z])\.\s*(.*?)(?=\s*;\s*[A-Z]\.\s*|$)"
     matches = re.findall(pattern, target_str, flags=re.DOTALL)
@@ -226,6 +241,8 @@ def save_results(results, conf, timestamp, partial=False):
         df["cfg_shuffle_seed"] = conf.get("shuffle_seed", "")
         df["cfg_model"] = conf.get("model", "")
         df["cfg_temperature"] = conf.get("temperature", "")
+        df["cfg_prediction_api_key_env"] = conf.get("prediction_api_key_env", "")
+        df["cfg_reasoning_api_key_env"] = conf.get("reasoning_api_key_env", "")
         df["cfg_use_candidate_reasoning"] = use_candidate_reasoning(conf)
         df["cfg_candidate_reasoning_max_output_tokens"] = conf.get("candidate_reasoning_max_output_tokens", "")
         df["cfg_max_retries"] = conf.get("max_retries", "")
@@ -236,7 +253,7 @@ def save_results(results, conf, timestamp, partial=False):
     return path, df, hit_rate, valid_ratio, valid_only_hit_rate, int(valid_mask.sum()) if not df.empty else 0
 
 
-async def process_samples(client, samples, conf, timestamp, initial_results=None, start_idx=0):
+async def process_samples(prediction_client, samples, conf, timestamp, initial_results=None, start_idx=0, reasoning_client=None):
     results = list(initial_results or [])
     concurrency = int(conf.get("max_concurrent", 10))
     semaphore = asyncio.Semaphore(concurrency)
@@ -261,7 +278,7 @@ async def process_samples(client, samples, conf, timestamp, initial_results=None
                         )
                     try:
                         reasoning_text = await generate_content_with_retry(
-                            client,
+                            reasoning_client or prediction_client,
                             conf["model"],
                             reasoning_prompt,
                             conf,
@@ -283,7 +300,7 @@ async def process_samples(client, samples, conf, timestamp, initial_results=None
 
                 try:
                     raw_text = await generate_content_with_retry(
-                        client,
+                        prediction_client,
                         conf["model"],
                         prompt,
                         conf,
@@ -303,7 +320,7 @@ async def process_samples(client, samples, conf, timestamp, initial_results=None
             async with semaphore:
                 try:
                     raw_text = await generate_content_with_retry(
-                        client,
+                        prediction_client,
                         conf["model"],
                         prompt,
                         conf,
@@ -378,15 +395,39 @@ def main():
     print(f">>> Dataset: {conf['dataset']}")
     print(f">>> Total test samples prepared: {len(samples)} (start_idx={args.start_idx})")
 
-    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-    if not api_key:
-        print("[Error] GEMINI_API_KEY or GOOGLE_API_KEY is not set in .env.")
+    try:
+        prediction_api_key, prediction_api_key_env = resolve_api_key(
+            conf,
+            "prediction_api_key_env",
+            ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+        )
+        prediction_client = genai.Client(api_key=prediction_api_key)
+        print(f">>> Prediction API key env: {prediction_api_key_env}")
+
+        reasoning_client = None
+        if use_candidate_reasoning(conf):
+            reasoning_api_key, reasoning_api_key_env = resolve_api_key(
+                conf,
+                "reasoning_api_key_env",
+                [prediction_api_key_env, "GEMINI_API_KEY", "GOOGLE_API_KEY"],
+            )
+            reasoning_client = genai.Client(api_key=reasoning_api_key)
+            print(f">>> Reasoning API key env: {reasoning_api_key_env}")
+    except ValueError as exc:
+        print(f"[Error] {exc}")
         return 1
 
-    client = genai.Client(api_key=api_key)
     try:
         results = asyncio.run(
-            process_samples(client, samples, conf, timestamp, initial_results=initial_results, start_idx=args.start_idx)
+            process_samples(
+                prediction_client,
+                samples,
+                conf,
+                timestamp,
+                initial_results=initial_results,
+                start_idx=args.start_idx,
+                reasoning_client=reasoning_client,
+            )
         )
     except QuotaExceededError as exc:
         partial_path = result_path(conf, timestamp, partial=True)

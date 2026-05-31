@@ -30,3 +30,7 @@ When disabled, the code runs the original baseline prompt directly.
 ## Retry Behavior
 
 The runner retries retryable service errors such as `503`, high-demand, overloaded, or temporarily unavailable responses. Quota or permission errors such as `403` stop the run immediately. Only fully completed samples are written to the partial CSV, so resuming starts from the next unfinished sample.
+
+## Separate API Keys
+
+Set `prediction_api_key_env` and `reasoning_api_key_env` in `config.yaml` to use different environment variables for final prediction calls and candidate reasoning calls. Leave either option empty to fall back to `GEMINI_API_KEY` or `GOOGLE_API_KEY`.
