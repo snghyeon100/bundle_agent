@@ -26,3 +26,7 @@ The default `data_path` points to `./datasets`, which is ignored by Git because 
 Set `use_candidate_reasoning: true` in `config.yaml` to use the two-step `candidate_reasoning` method. The first step asks the model to write pure English reasoning for each candidate independently. The second step passes those ten reasoning outputs back to the model and asks for the final single-letter prediction.
 
 When disabled, the code runs the original baseline prompt directly.
+
+## Retry Behavior
+
+The runner retries retryable service errors such as `503`, high-demand, overloaded, or temporarily unavailable responses. Quota or permission errors such as `403` stop the run immediately. Only fully completed samples are written to the partial CSV, so resuming starts from the next unfinished sample.

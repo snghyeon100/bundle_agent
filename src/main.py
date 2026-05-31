@@ -13,6 +13,10 @@ from google import genai
 from dataset import BundleZeroShotDataset, set_seed
 
 
+class QuotaExceededError(RuntimeError):
+    pass
+
+
 env_path = os.path.join(os.path.dirname(__file__), "..", ".env")
 load_dotenv(dotenv_path=env_path, encoding="utf-8-sig")
 
@@ -37,6 +41,62 @@ def use_candidate_reasoning(conf):
 def parse_candidate_options(target_str):
     pattern = r"([A-Z])\. (.*?)(?=; [A-Z]\. |$)"
     return [(letter, text.strip()) for letter, text in re.findall(pattern, target_str)]
+
+
+def is_quota_error(exc):
+    message = str(exc).lower()
+    quota_markers = [
+        "403",
+        "quota",
+        "rate limit exceeded",
+        "resource exhausted",
+        "permission denied",
+        "billing",
+    ]
+    return any(marker in message for marker in quota_markers)
+
+
+def is_retryable_error(exc):
+    message = str(exc).lower()
+    retry_markers = [
+        "503",
+        "high demand",
+        "overloaded",
+        "service unavailable",
+        "temporarily unavailable",
+        "try again later",
+        "unavailable",
+    ]
+    return any(marker in message for marker in retry_markers)
+
+
+async def generate_content_with_retry(client, model, contents, conf, max_output_tokens, step_name):
+    max_retries = int(conf.get("max_retries", 5))
+    retry_wait_seconds = float(conf.get("retry_wait_seconds", 30))
+
+    for attempt in range(max_retries + 1):
+        try:
+            response = await client.aio.models.generate_content(
+                model=model,
+                contents=contents,
+                config={
+                    "temperature": float(conf.get("temperature", 0.0)),
+                    "max_output_tokens": int(max_output_tokens),
+                },
+            )
+            return response.text or ""
+        except Exception as exc:
+            if is_quota_error(exc):
+                raise QuotaExceededError(f"Quota or permission error during {step_name}: {exc}") from exc
+            if is_retryable_error(exc) and attempt < max_retries:
+                wait_time = retry_wait_seconds * (attempt + 1)
+                print(
+                    f"[Retry] {step_name} failed with retryable error "
+                    f"({attempt + 1}/{max_retries}); waiting {wait_time:.1f}s"
+                )
+                await asyncio.sleep(wait_time)
+                continue
+            raise
 
 
 def generate_prompt(dataset_name, input_str, target_str):
@@ -163,6 +223,8 @@ def save_results(results, conf, timestamp, partial=False):
         df["cfg_temperature"] = conf.get("temperature", "")
         df["cfg_use_candidate_reasoning"] = use_candidate_reasoning(conf)
         df["cfg_candidate_reasoning_max_output_tokens"] = conf.get("candidate_reasoning_max_output_tokens", "")
+        df["cfg_max_retries"] = conf.get("max_retries", "")
+        df["cfg_retry_wait_seconds"] = conf.get("retry_wait_seconds", "")
 
     path = result_path(conf, timestamp, partial=partial)
     df.to_csv(path, index=False, encoding="utf-8-sig")
@@ -188,15 +250,16 @@ async def process_samples(client, samples, conf, timestamp, initial_results=None
                         conf["dataset"], sample["input_str"], candidate_letter, candidate_text
                     )
                     try:
-                        response = await client.aio.models.generate_content(
-                            model=conf["model"],
-                            contents=reasoning_prompt,
-                            config={
-                                "temperature": float(conf.get("temperature", 0.0)),
-                                "max_output_tokens": int(conf.get("candidate_reasoning_max_output_tokens", 220)),
-                            },
+                        reasoning_text = await generate_content_with_retry(
+                            client,
+                            conf["model"],
+                            reasoning_prompt,
+                            conf,
+                            conf.get("candidate_reasoning_max_output_tokens", 220),
+                            f"sample {current_idx + 1} candidate {candidate_letter} reasoning",
                         )
-                        reasoning_text = response.text or ""
+                    except QuotaExceededError:
+                        raise
                     except Exception as exc:
                         reasoning_text = str(exc)
                     candidate_reasonings.append((candidate_letter, reasoning_text))
@@ -209,16 +272,17 @@ async def process_samples(client, samples, conf, timestamp, initial_results=None
                     print_first_qa_debug(sample, prompt)
 
                 try:
-                    response = await client.aio.models.generate_content(
-                        model=conf["model"],
-                        contents=prompt,
-                        config={
-                            "temperature": float(conf.get("temperature", 0.0)),
-                            "max_output_tokens": int(conf.get("max_output_tokens", 10)),
-                        },
+                    raw_text = await generate_content_with_retry(
+                        client,
+                        conf["model"],
+                        prompt,
+                        conf,
+                        conf.get("max_output_tokens", 10),
+                        f"sample {current_idx + 1} prediction",
                     )
-                    raw_text = response.text or ""
                     prediction = parse_model_response(raw_text)
+                except QuotaExceededError:
+                    raise
                 except Exception as exc:
                     raw_text = str(exc)
                     prediction = "ERR_EX"
@@ -228,16 +292,17 @@ async def process_samples(client, samples, conf, timestamp, initial_results=None
 
             async with semaphore:
                 try:
-                    response = await client.aio.models.generate_content(
-                        model=conf["model"],
-                        contents=prompt,
-                        config={
-                            "temperature": float(conf.get("temperature", 0.0)),
-                            "max_output_tokens": int(conf.get("max_output_tokens", 10)),
-                        },
+                    raw_text = await generate_content_with_retry(
+                        client,
+                        conf["model"],
+                        prompt,
+                        conf,
+                        conf.get("max_output_tokens", 10),
+                        f"sample {current_idx + 1} prediction",
                     )
-                    raw_text = response.text or ""
                     prediction = parse_model_response(raw_text)
+                except QuotaExceededError:
+                    raise
                 except Exception as exc:
                     raw_text = str(exc)
                     prediction = "ERR_EX"
@@ -251,7 +316,12 @@ async def process_samples(client, samples, conf, timestamp, initial_results=None
     for offset in range(0, len(samples), concurrency):
         chunk = samples[offset : offset + concurrency]
         tasks = [run_one(sample, start_idx + offset + idx) for idx, sample in enumerate(chunk)]
-        for row in await asyncio.gather(*tasks):
+        try:
+            completed_rows = await asyncio.gather(*tasks)
+        except QuotaExceededError:
+            save_results(results, conf, timestamp, partial=True)
+            raise
+        for row in completed_rows:
             results.append(row)
         save_results(results, conf, timestamp, partial=True)
 
@@ -304,9 +374,15 @@ def main():
         return 1
 
     client = genai.Client(api_key=api_key)
-    results = asyncio.run(
-        process_samples(client, samples, conf, timestamp, initial_results=initial_results, start_idx=args.start_idx)
-    )
+    try:
+        results = asyncio.run(
+            process_samples(client, samples, conf, timestamp, initial_results=initial_results, start_idx=args.start_idx)
+        )
+    except QuotaExceededError as exc:
+        partial_path = result_path(conf, timestamp, partial=True)
+        print(f"[Stopped] {exc}")
+        print(f"[Resume] Completed samples were saved to: {partial_path}")
+        return 1
 
     save_path, df, hit_rate, valid_ratio, valid_only_hit_rate, valid_sum = save_results(
         results, conf, timestamp, partial=False
