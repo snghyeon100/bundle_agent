@@ -39,8 +39,9 @@ def use_candidate_reasoning(conf):
 
 
 def parse_candidate_options(target_str):
-    pattern = r"([A-Z])\. (.*?)(?=; [A-Z]\. |$)"
-    return [(letter, text.strip()) for letter, text in re.findall(pattern, target_str)]
+    pattern = r"(?:^|;\s*)([A-Z])\.\s*(.*?)(?=\s*;\s*[A-Z]\.\s*|$)"
+    matches = re.findall(pattern, target_str, flags=re.DOTALL)
+    return [(letter, " ".join(text.split())) for letter, text in matches]
 
 
 def is_quota_error(exc):
