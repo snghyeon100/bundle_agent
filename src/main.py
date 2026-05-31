@@ -193,18 +193,20 @@ def generate_prediction_from_reasoning_prompt(dataset_name, input_str, target_st
         bundle_name = "fashion outfit"
         item_name = "fashion item"
 
-    reasoning_block = "\n".join(
-        f"Candidate {letter} reasoning: {reasoning}"
-        for letter, reasoning in candidate_reasonings
-    )
+    reasoning_by_letter = {letter: reasoning for letter, reasoning in candidate_reasonings}
+    option_lines = []
+    for letter, candidate_text in parse_candidate_options(target_str):
+        reasoning = reasoning_by_letter.get(letter, "")
+        option_lines.append(f"{letter}. {candidate_text}\nReasoning: {reasoning}")
+    options_with_reasoning = "\n".join(option_lines)
+
     return (
         f"You are a helpful and honest assistant. The following are multiple choice questions about {task_name}. "
         f"You should directly answer the question by choosing the letter of the correct option. "
         f"Only provide the letter of your answer, without any explanation or mentioning the option content.\n"
         f"Question: Given the partial {bundle_name}: {input_str}, "
         f"which candidate {item_name} should be included into this {bundle_name}?\n"
-        f"Options: {target_str}\n"
-        f"Candidate-wise reasoning:\n{reasoning_block}\n"
+        f"Options with reasoning:\n{options_with_reasoning}\n"
         f"Your answer should indicate your choice with a single letter (e.g., \"A,\" \"B,\" \"C,\" etc.).\nChoice: "
     )
 
