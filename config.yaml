@@ -16,7 +16,7 @@ max_output_tokens: 10
 prediction_api_key_env: ""       # empty = GEMINI_API_KEY or GOOGLE_API_KEY
 reasoning_api_key_env: ""        # empty = prediction key env, GEMINI_API_KEY, or GOOGLE_API_KEY
 use_candidate_reasoning: false
-candidate_reasoning_max_output_tokens: 220
+candidate_reasoning_max_output_tokens: 1200
 max_retries: 5
 retry_wait_seconds: 30
 

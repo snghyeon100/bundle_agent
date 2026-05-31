@@ -23,7 +23,7 @@ The default `data_path` points to `./datasets`, which is ignored by Git because 
 
 ## Candidate Reasoning Method
 
-Set `use_candidate_reasoning: true` in `config.yaml` to use the two-step `candidate_reasoning` method. The first step asks the model to write pure English reasoning for each candidate independently. The second step passes those ten reasoning outputs back to the model and asks for the final single-letter prediction.
+Set `use_candidate_reasoning: true` in `config.yaml` to use the two-step `candidate_reasoning` method. The first step asks the model once to write pure English reasoning for all candidates. The second step passes those candidate reasoning outputs back to the model and asks for the final single-letter prediction.
 
 When disabled, the code runs the original baseline prompt directly.
 
@@ -33,4 +33,4 @@ The runner retries retryable service errors such as `503`, high-demand, overload
 
 ## Separate API Keys
 
-Set `prediction_api_key_env` and `reasoning_api_key_env` in `config.yaml` to use different environment variables for final prediction calls and candidate reasoning calls. Leave either option empty to fall back to `GEMINI_API_KEY` or `GOOGLE_API_KEY`.
+Set `prediction_api_key_env` and `reasoning_api_key_env` in `config.yaml` to use different environment variables for final prediction calls and the single candidate reasoning call. Leave either option empty to fall back to `GEMINI_API_KEY` or `GOOGLE_API_KEY`.

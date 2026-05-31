@@ -136,30 +136,52 @@ def generate_prompt(dataset_name, input_str, target_str):
     )
 
 
-def generate_candidate_reasoning_prompt(dataset_name, input_str, candidate_letter, candidate_text):
+def generate_candidate_reasoning_prompt(dataset_name, input_str, candidate_options):
     if "spotify" in dataset_name:
         task_name = "playlist continuation"
         bundle_name = "music playlist"
         criteria = (
-            "Discuss whether this playlist feels coherent in theme, mood, genre, artist or album context, "
+            "Discuss whether each playlist feels coherent in theme, mood, genre, artist or album context, "
             "and listening flow."
         )
     else:
         task_name = "bundle construction"
         bundle_name = "fashion outfit"
         criteria = (
-            "Discuss whether this outfit feels coherent in concept, seasonality, style, color or material harmony, "
+            "Discuss whether each outfit feels coherent in concept, seasonality, style, color or material harmony, "
             "and item-category compatibility."
         )
 
-    completed_bundle = f"{input_str}; {candidate_text}"
+    completed_bundles = []
+    for letter, candidate_text in candidate_options:
+        completed_bundles.append(f"{letter}: {input_str}; {candidate_text}")
+    completed_bundle_block = "\n".join(completed_bundles)
+
+    letters = ", ".join(letter for letter, _ in candidate_options)
     return (
         f"You are a {task_name} analyst.\n"
-        f"Review the following completed {bundle_name}: {completed_bundle}\n"
-        f"For this {bundle_name}, provide reasoning about how well the items work together. {criteria}\n"
-        f"Write only a concise reasoning paragraph in English. Do not choose an answer.\nReasoning: "
+        f"Review the following completed {bundle_name}s. Each line appends one possible final item to the same input items.\n"
+        f"{completed_bundle_block}\n"
+        f"For each completed {bundle_name}, provide reasoning about how well the items work together. {criteria}\n"
+        f"Write only concise reasoning in English. Do not choose an answer.\n"
+        f"Return exactly one reasoning paragraph for each label ({letters}) using this format:\n"
+        f"A: reasoning text\nB: reasoning text\n...\nReasoning:\n"
     )
 
+
+def parse_candidate_reasonings(raw_text, candidate_options):
+    reasonings = []
+    text = str(raw_text or "").strip()
+    for idx, (letter, _) in enumerate(candidate_options):
+        next_letter = candidate_options[idx + 1][0] if idx + 1 < len(candidate_options) else None
+        if next_letter:
+            pattern = rf"(?:^|\n)\s*{letter}\s*[:\).\-]\s*(.*?)(?=\n\s*{next_letter}\s*[:\).\-]\s*|$)"
+        else:
+            pattern = rf"(?:^|\n)\s*{letter}\s*[:\).\-]\s*(.*)$"
+        match = re.search(pattern, text, flags=re.DOTALL | re.IGNORECASE)
+        reasoning = " ".join(match.group(1).split()) if match else ""
+        reasonings.append((letter, reasoning))
+    return reasonings
 
 def generate_prediction_from_reasoning_prompt(dataset_name, input_str, target_str, candidate_reasonings):
     if "spotify" in dataset_name:
@@ -264,32 +286,30 @@ async def process_samples(prediction_client, samples, conf, timestamp, initial_r
         prompt = generate_prompt(conf["dataset"], sample["input_str"], sample["target_str"])
 
         if use_candidate_reasoning(conf):
-            candidate_reasonings = []
             options = parse_candidate_options(sample["target_str"])
             async with semaphore:
-                for candidate_letter, candidate_text in options:
-                    reasoning_prompt = generate_candidate_reasoning_prompt(
-                        conf["dataset"], sample["input_str"], candidate_letter, candidate_text
+                reasoning_prompt = generate_candidate_reasoning_prompt(
+                    conf["dataset"], sample["input_str"], options
+                )
+                if current_idx == start_idx:
+                    print_llm_prompt_debug("First Candidate Reasoning Prompt Sent To Model", reasoning_prompt)
+                try:
+                    reasoning_raw_text = await generate_content_with_retry(
+                        reasoning_client or prediction_client,
+                        conf["model"],
+                        reasoning_prompt,
+                        conf,
+                        conf.get("candidate_reasoning_max_output_tokens", 1200),
+                        f"sample {current_idx + 1} candidate reasoning",
                     )
-                    if current_idx == start_idx:
-                        print_llm_prompt_debug(
-                            f"First Candidate Reasoning Prompt {len(candidate_reasonings) + 1} Sent To Model",
-                            reasoning_prompt,
-                        )
-                    try:
-                        reasoning_text = await generate_content_with_retry(
-                            reasoning_client or prediction_client,
-                            conf["model"],
-                            reasoning_prompt,
-                            conf,
-                            conf.get("candidate_reasoning_max_output_tokens", 220),
-                            f"sample {current_idx + 1} candidate {candidate_letter} reasoning",
-                        )
-                    except QuotaExceededError:
-                        raise
-                    except Exception as exc:
-                        reasoning_text = str(exc)
-                    candidate_reasonings.append((candidate_letter, reasoning_text))
+                except QuotaExceededError:
+                    raise
+                except Exception as exc:
+                    reasoning_raw_text = str(exc)
+
+                row["reasoning_raw_response"] = reasoning_raw_text
+                candidate_reasonings = parse_candidate_reasonings(reasoning_raw_text, options)
+                for candidate_letter, reasoning_text in candidate_reasonings:
                     row[f"reasoning_{candidate_letter}"] = reasoning_text
 
                 prompt = generate_prediction_from_reasoning_prompt(
