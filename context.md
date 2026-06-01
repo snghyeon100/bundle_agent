@@ -218,3 +218,28 @@ data_path
 ```
 
 The exact LLM responses can still vary slightly despite `temperature: 0.0` because provider-side generation behavior is not guaranteed to be bit-for-bit deterministic.
+
+## Self-Generated LightGCN Features
+
+`utils/train_lightgcn_features.py` trains LightGCN item features directly from local raw relational data when existing CF feature provenance is unclear.
+
+Default behavior:
+
+- UI graph: trains on `ui_full.txt`, treating users as contexts and items as targets.
+- BI graph: trains on `bi_train.txt`, treating bundles as contexts and items as targets.
+- Initialization: Xavier uniform.
+- Objective: BPR ranking loss with uniform unobserved-item negative sampling.
+- Propagation: LightGCN layer averaging over `E^(0)..E^(K)`.
+- Outputs: `ui_item_embeddings.pt`, `bi_item_embeddings.pt`, and metadata JSON files under `datasets/<dataset>/lightgcn_self/`.
+
+Example BI-only smoke/debug run:
+
+```powershell
+python utils\train_lightgcn_features.py --dataset pog_dense --graphs bi --epochs 1 --max-train-edges 10000
+```
+
+Example full run:
+
+```powershell
+python utils\train_lightgcn_features.py --dataset pog_dense --graphs ui bi --embedding-dim 64 --num-layers 3 --epochs 100
+```
