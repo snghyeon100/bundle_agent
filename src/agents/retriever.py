@@ -42,7 +42,8 @@ def generate_code_prompt(sample, planning_text, workspace, evidence_output_file,
         "- Do not access files outside data/ and output/.\n"
         "- Be robust: if a source cannot be loaded, record that in warnings and continue.\n"
         f"- Keep the printed JSON under about {max_stdout_chars} characters.\n"
-        "- Do not choose the final answer; only provide evidence and optional preliminary evidence ranking.\n"
+        "- Do not choose the final answer; only provide measured evidence values.\n"
+        "- Do not decide or label the best candidate. For numeric signals, output candidate values only; the verifier and predictor will interpret them.\n"
         "- Do not add generic evidence_for claims when a signal is zero, tied, unavailable, or failed; put those issues in evidence_against or warnings.\n"
         f"- Include every candidate label exactly once: {', '.join(labels)}.\n\n"
         "The JSON must use this compact schema. Keep values short and candidate-focused:\n"
@@ -50,7 +51,7 @@ def generate_code_prompt(sample, planning_text, workspace, evidence_output_file,
         '  "summary": "...",\n'
         '  "raw_files_used": ["item_info.json", "bi_train.txt"],\n'
         '  "numeric_comparisons": [\n'
-        '    {"signal": "...", "values": {"A": 0.0, "B": 0.0}, "best_labels": ["A"], "note": "..."}\n'
+        '    {"signal": "...", "values": {"A": 0.0, "B": 0.0}, "higher_is_better": true, "note": "..."}\n'
         '  ],\n'
         '  "candidate_evidence": {\n'
         '    "A": {\n'
@@ -93,6 +94,7 @@ def generate_code_repair_prompt(sample, planning_text, previous_code, execution_
         "- Do not access files outside data/ and output/.\n"
         f"- Include every candidate label exactly once: {', '.join(labels)}.\n"
         "- Keep candidate_evidence, numeric_comparisons, and warnings. Do not add extra large raw dumps.\n"
+        "- Do not include best_labels or winner fields in numeric_comparisons; output values only.\n"
         "- If a previous planned analysis cannot be implemented, record the limitation in warnings instead of fabricating evidence.\n\n"
         "Return only the corrected Python code."
     )

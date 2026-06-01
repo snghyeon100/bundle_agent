@@ -29,6 +29,7 @@ def generate_verifier_prompt(sample, planning_text, evidence_json, execution_sum
         f"{json.dumps(evidence_json, ensure_ascii=False, indent=2)}\n\n"
         "Critique the actual evidence JSON, not just the natural-language summary. "
         "Inspect candidate signals, numeric gaps, ties, all-zero outputs, missing values, failed analyses, and provenance. "
+        "Interpret numeric_comparisons from their candidate values yourself; do not rely on any generated-code claim about winners or best labels. "
         "Embedding-only or single-signal evidence should usually be at most medium unless the numeric separation is clear and the analysis is well aligned with the task. "
         "If a signal ranks candidates but the top candidates are very close, mark the signal as tie-heavy or low-margin. "
         "If the code failed or produced no usable evidence, request repair or replanning through the JSON fields.\n\n"

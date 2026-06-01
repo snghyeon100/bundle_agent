@@ -1,11 +1,11 @@
 # Dataset
-dataset: pog_dense          # pog | pog_dense | spotify | spotify_sparse
+dataset: pog          # pog | pog_dense | spotify | spotify_sparse
 data_path: ./datasets
 
 # Evaluation
 num_cans: 10                # number of candidates including the answer
 num_token: 5                # max input items per bundle (-1 = no limit)
-toy_eval: 3               # -1 = full test set | N = first N samples
+toy_eval: 2               # -1 = full test set | N = first N samples
 seed: 45                    # seed for candidate items
 shuffle_seed: 41            # seed for input item order
 
@@ -21,9 +21,9 @@ candidate_reasoning_max_output_tokens: 1200
 # Four-stage code-writing agent
 use_four_stage_agent: true
 agent_planning_api_key_env: "GEMINI_API_KEY_1"       # empty = prediction key env, GEMINI_API_KEY, or GOOGLE_API_KEY
-agent_code_api_key_env: "GEMINI_API_KEY_2"           # empty = planning/prediction key env, GEMINI_API_KEY, or GOOGLE_API_KEY
-agent_verifier_api_key_env: "GEMINI_API_KEY_1"       # empty = planning/prediction key env, GEMINI_API_KEY, or GOOGLE_API_KEY
-agent_prediction_api_key_env: "GEMINI_API_KEY_2"     # empty = prediction/planning key env, GEMINI_API_KEY, or GOOGLE_API_KEY
+agent_code_api_key_env: "GEMINI_API_KEY_3"           # empty = planning/prediction key env, GEMINI_API_KEY, or GOOGLE_API_KEY
+agent_verifier_api_key_env: "GEMINI_API_KEY_3"       # empty = planning/prediction key env, GEMINI_API_KEY, or GOOGLE_API_KEY
+agent_prediction_api_key_env: "GEMINI_API_KEY_4"     # empty = prediction/planning key env, GEMINI_API_KEY, or GOOGLE_API_KEY
 agent_planning_max_output_tokens: 1600
 agent_code_max_output_tokens: 2200
 agent_verifier_max_output_tokens: 800
