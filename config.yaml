@@ -5,7 +5,7 @@ data_path: ./datasets
 # Evaluation
 num_cans: 10                # number of candidates including the answer
 num_token: 5                # max input items per bundle (-1 = no limit)
-toy_eval: 250               # -1 = full test set | N = first N samples
+toy_eval: 3               # -1 = full test set | N = first N samples
 seed: 45                    # seed for candidate items
 shuffle_seed: 41            # seed for input item order
 
@@ -18,18 +18,24 @@ reasoning_api_key_env: ""        # empty = prediction key env, GEMINI_API_KEY, o
 use_candidate_reasoning: false
 candidate_reasoning_max_output_tokens: 1200
 
-# Three-stage code-writing agent
-use_three_stage_agent: false
-agent_planning_api_key_env: ""       # empty = prediction key env, GEMINI_API_KEY, or GOOGLE_API_KEY
-agent_code_api_key_env: ""           # empty = planning/prediction key env, GEMINI_API_KEY, or GOOGLE_API_KEY
-agent_prediction_api_key_env: ""     # empty = prediction/planning key env, GEMINI_API_KEY, or GOOGLE_API_KEY
-agent_planning_max_output_tokens: 800
+# Four-stage code-writing agent
+use_four_stage_agent: true
+agent_planning_api_key_env: "GEMINI_API_KEY_1"       # empty = prediction key env, GEMINI_API_KEY, or GOOGLE_API_KEY
+agent_code_api_key_env: "GEMINI_API_KEY_2"           # empty = planning/prediction key env, GEMINI_API_KEY, or GOOGLE_API_KEY
+agent_verifier_api_key_env: "GEMINI_API_KEY_1"       # empty = planning/prediction key env, GEMINI_API_KEY, or GOOGLE_API_KEY
+agent_prediction_api_key_env: "GEMINI_API_KEY_2"     # empty = prediction/planning key env, GEMINI_API_KEY, or GOOGLE_API_KEY
+agent_planning_max_output_tokens: 1600
 agent_code_max_output_tokens: 2200
+agent_verifier_max_output_tokens: 800
 agent_prediction_max_output_tokens: 800
+agent_max_retrieval_rounds: 2
+agent_workspace_root: ./agent_workspaces
+agent_evidence_output_file: output/evidence.json
 agent_code_timeout_seconds: 30
 agent_code_max_stdout_chars: 20000
 agent_code_max_stderr_chars: 8000
 agent_code_max_repair_attempts: 1
+agent_enable_code_guard: true
 agent_allowed_files:
   - count.json
   - item_info.json

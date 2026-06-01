@@ -2,14 +2,15 @@
 
 ## Purpose
 
-`bundle_agent` is a simplified zero-shot bundle completion runner derived from the larger `LLM-ZeroShot` workspace. The repository keeps the baseline evaluation path as the default and adds one optional two-step method, `candidate_reasoning`.
+`bundle_agent` is a simplified zero-shot bundle completion runner derived from the larger `LLM-ZeroShot` workspace. The repository keeps the baseline evaluation path as the default, keeps the optional two-step `candidate_reasoning` method, and adds an optional four-stage code-writing agent method for raw-data evidence retrieval.
 
 Large local artifacts are intentionally not committed. The `datasets/`, `results/`, `.env`, and Python cache directories are ignored by Git.
 
 ## Repository Structure
 
 - `src/dataset.py`: loads BundleConstruction datasets, builds candidate multiple-choice samples, and formats item text.
-- `src/main.py`: runs baseline or candidate-reasoning evaluation, saves partial/final CSV files, supports resume, retry, and separate API keys.
+- `src/main.py`: runs baseline, candidate-reasoning, or four-stage agent evaluation, saves partial/final CSV files, supports resume, retry, and separate API keys.
+- `src/agents/`: modular four-stage agent prompts, allowed-workspace preparation, generated-code execution, verifier-guided replanning, and final prediction orchestration.
 - `config.yaml`: controls dataset, model, evaluation seeds, API key env names, retry policy, and method options.
 - `requirements.txt`: minimal Python dependencies.
 - `datasets/`: local BundleConstruction dataset checkout plus copied embedding caches. This folder is ignored by Git.
@@ -94,27 +95,44 @@ Choice:
 
 The final raw response is stored in `raw_response`, the parsed answer in `prediction`, and correctness in `hit`.
 
-## Three-Stage Code-Writing Agent Method
+## Four-Stage Code-Writing Agent Method
 
-The three-stage agent method is active when:
+The four-stage agent method is active when:
 
 ```yaml
-use_three_stage_agent: true
+use_four_stage_agent: true
 ```
 
-This mode is mutually prioritized over the baseline and candidate reasoning branches. Each sample uses three LLM stages:
+This mode is mutually prioritized over the baseline and candidate reasoning branches. Each sample uses four LLM stages with up to two investigation rounds by default. The method is designed as agentic code-RAG over raw train-safe data: the model is not handed a precomputed context recipe for every sample. Instead, it receives a task description, raw file contracts, and an allowed local workspace, then writes and executes code to build sample-specific evidence.
 
-1. Planning agent: reads the current input/candidate item ids and texts, plus available raw data paths, then decides what evidence should be retrieved.
-2. Code-writing retrieval agent: writes Python code that inspects allowed raw files such as `item_info.json`, `bi_train.txt`, `ui_full.txt`, and optional text/content embedding cache files. The generated code must print one JSON evidence object with standardized candidate-level `evidence_for`, `evidence_against`, and numeric signals.
-3. Prediction agent: receives the original sample, planning output, generated code, code execution result, and retrieved evidence, then returns final JSON with `source_reliability_assessment`, `candidate_tradeoff`, `decision_rule`, `prediction`, `reasoning`, `confidence`, and `main_sources_used_for_decision`.
+The current version keeps the stage contracts intentionally compact. Full generated code, raw stage responses, stdout, stderr, and detailed traces are still saved to CSV for debugging, but downstream LLM stages receive compact round summaries rather than the entire raw trajectory.
 
-The runner executes generated code with the same Python executable that launched `src/main.py`, stores stdout/stderr, and continues even if optional evidence sources cannot be loaded. If generated code fails or does not print valid JSON, the code-writing agent receives stdout/stderr and can repair the script up to `agent_code_max_repair_attempts`.
+All four stage prompts receive a short dataset/task semantics block:
+
+- POG/POG-dense: fashion outfit bundle completion. A bundle is a coordinated set of fashion items, typically combining multiple item roles into one outfit. The goal is to choose the candidate that most naturally completes the outfit as a coherent set.
+- Spotify/Spotify-Sparse: playlist continuation. A bundle is a music playlist made of songs intended to be listened to together. The goal is to choose the candidate that most naturally continues the playlist as a coherent listening sequence.
+
+The task semantics are intentionally descriptive rather than prescriptive: they explain what a bundle means for the dataset without hard-coding rules such as which feature must matter most.
+
+The current four-stage structure is:
+
+1. Investigation designer: reads the current input/candidate item ids and texts, task semantics, compact previous rounds if any, verifier feedback if any, and the allowed workspace file contracts. Round 1 is a broad sweep over useful sources and signals. It should be creative and deep within the allowed files: transform, join, invert, aggregate, or re-abstract raw data to expose candidate-level differences that are not obvious from one file. Fused analyses such as `BI x item_info`, `UI x metadata`, `embedding x relational evidence`, `BI x IB`, `IB x BI`, or `IU x UI` are examples of useful patterns when they can produce stronger candidate-level signals. Follow-up rounds are narrower and deeper, guided by verifier feedback.
+2. Programmatic evidence builder: writes Python code that implements the plan over allowed workspace files such as `item_info.json`, `bi_train.txt`, `ui_full.txt`, and optional text/content embedding cache files. In round 1 it tries to extract diverse candidate-level analysis values, including cross-source and optional multi-hop graph-style signals when useful; in later rounds it prioritizes deeper or more creative follow-up analyses. It should favor derived evidence such as inverted indexes, neighborhoods, category/style abstractions, and aggregated compatibility signals instead of only reporting direct counts. The generated code writes compact evidence JSON with `summary`, `raw_files_used`, `numeric_comparisons`, candidate-level `candidate_evidence`, and `warnings`.
+3. Evidence critic: evaluates the parsed evidence JSON plus a compact execution summary. It checks candidate coverage, failed analyses, all-zero signals, ties, low numeric margins, weak provenance, and contradictory evidence. If more retrieval is useful, it suggests deeper follow-up work that remains implementable from allowed files, such as new joins, alternate abstraction levels, candidate subsets, cross-source combinations, or transformations that could make weak broad-sweep signals more discriminative.
+4. Reliability-aware predictor: receives only compact round summaries. It returns final JSON with `evidence_quality`, `candidate_tradeoff`, `downweighted_evidence`, `decision_rule`, `prediction`, `reasoning`, `confidence`, and `main_sources_used_for_decision`.
+
+Re-planning uses compact previous rounds with parsed plan, execution summary, parsed evidence, and verifier JSON. The planner is instructed not to simply repeat the previous plan; if signals were all-zero, tie-heavy, failed, or too shallow, it should change the abstraction level or investigation idea.
+
+The runner creates one persistent allowed workspace per dataset under `agent_workspaces/{dataset}/`. It copies allowed files into `data/`, writes generated scripts into the workspace, and runs them with the workspace as `cwd`. The LLM sees only relative workspace paths such as `data/item_info.json` and `output/evidence_*.json`, not original dataset paths.
+
+The runner executes generated code with the same Python executable that launched `src/main.py`, stores stdout/stderr, and continues even if optional evidence sources cannot be loaded. If generated code fails, is blocked by the simple guard, or does not produce valid JSON, the code-writing agent receives stdout/stderr and can repair the script up to `agent_code_max_repair_attempts`.
 
 Stage-specific API key config:
 
 ```yaml
 agent_planning_api_key_env: ""
 agent_code_api_key_env: ""
+agent_verifier_api_key_env: ""
 agent_prediction_api_key_env: ""
 ```
 
@@ -131,13 +149,16 @@ agent_allowed_files:
   - content_feature.pt
   - description_feature.pt
 agent_allow_interaction_embeddings: false
+agent_workspace_root: ./agent_workspaces
+agent_max_retrieval_rounds: 2
+agent_enable_code_guard: true
 ```
 
 `bi_full.txt` and `item_cf_feature.pt` are excluded by default. `item_cf_feature.pt` is exposed only when `agent_allow_interaction_embeddings: true`, because its train-only provenance should be checked before use.
 
-Important leakage rule: prompts instruct the agent not to read `bi_full.txt`, `bi_test_gt.txt`, validation/test ground-truth files, result CSVs, predictions, hits, or true labels. The current prototype exposes allowed raw data paths in the prompt, but does not yet enforce a filesystem sandbox around generated code.
+Important leakage rule: prompts instruct the agent not to read `bi_full.txt`, `bi_test_gt.txt`, validation/test ground-truth files, result CSVs, predictions, hits, or true labels. The code runs inside the allowed workspace with copied files only, and a simple guard blocks common leakage patterns such as parent-directory traversal, absolute Windows drive paths, `bi_full`, test ground-truth names, and result paths.
 
-Result CSVs store planning/code/prediction traces including `agent_planning_raw_response`, `agent_generated_code`, `agent_code_stdout`, `agent_code_stderr`, `agent_code_repair_attempts_used`, `agent_evidence_json`, `agent_prediction_raw_response`, `agent_reasoning`, `agent_confidence`, `agent_source_reliability_assessment`, `agent_candidate_tradeoff`, and `agent_decision_rule`.
+Result CSVs store planning/code/verifier/prediction traces including `agent_workspace_dir`, `agent_round_count`, `agent_retrieval_rounds_json`, `agent_all_plans_json`, `agent_all_generated_codes_json`, `agent_all_evidence_json`, `agent_all_verifier_json`, `agent_prediction_raw_response`, `agent_reasoning`, `agent_confidence`, `agent_evidence_quality`, `agent_candidate_tradeoff`, `agent_downweighted_evidence`, and `agent_decision_rule`.
 
 ## Result Saving and Resume
 

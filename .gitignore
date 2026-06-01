@@ -16,6 +16,7 @@ __pycache__/
 results/**
 !results/.gitkeep
 datasets/
+agent_workspaces/
 
 # IDE and OS files
 .vscode/

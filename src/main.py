@@ -1,11 +1,8 @@
 import argparse
 import asyncio
-import json
 import os
 import re
-import subprocess
 import sys
-import tempfile
 import time
 
 import pandas as pd
@@ -13,6 +10,8 @@ import yaml
 from dotenv import load_dotenv
 from google import genai
 
+from agents.common import compact_json
+from agents.pipeline import run_four_stage_agent
 from dataset import BundleZeroShotDataset, set_seed
 
 
@@ -41,13 +40,13 @@ def use_candidate_reasoning(conf):
     return bool(conf.get("use_candidate_reasoning", False))
 
 
-def use_three_stage_agent(conf):
-    return bool(conf.get("use_three_stage_agent", False))
+def use_four_stage_agent(conf):
+    return bool(conf.get("use_four_stage_agent", False))
 
 
 def method_name(conf):
-    if use_three_stage_agent(conf):
-        return "three_stage_agent"
+    if use_four_stage_agent(conf):
+        return "four_stage_agent"
     if use_candidate_reasoning(conf):
         return "candidate_reasoning"
     return "baseline"
@@ -72,292 +71,6 @@ def parse_candidate_options(target_str):
     pattern = r"(?:^|;\s*)([A-Z])\.\s*(.*?)(?=\s*;\s*[A-Z]\.\s*|$)"
     matches = re.findall(pattern, target_str, flags=re.DOTALL)
     return [(letter, " ".join(text.split())) for letter, text in matches]
-
-
-def build_agent_sample_view(sample):
-    candidate_options = parse_candidate_options(sample["target_str"])
-    candidates = []
-    for idx, (letter, text) in enumerate(candidate_options):
-        item_id = sample["candidate_indices"][idx] if idx < len(sample["candidate_indices"]) else None
-        candidates.append({"label": letter, "item_id": item_id, "text": text})
-    return {
-        "bundle_id": sample["bundle_id"],
-        "input_item_ids": sample["input_indices"],
-        "input_text": sample["input_str"],
-        "candidates": candidates,
-    }
-
-
-def list_agent_available_files(conf):
-    data_root = os.path.abspath(os.path.join(conf["data_path"], conf["dataset"]))
-    preferred = conf.get("agent_allowed_files") or [
-        "count.json",
-        "item_info.json",
-        "bi_train.txt",
-        "ui_full.txt",
-        "content_feature.pt",
-        "description_feature.pt",
-    ]
-    if bool(conf.get("agent_allow_interaction_embeddings", False)):
-        preferred = list(preferred) + ["item_cf_feature.pt"]
-
-    files = []
-    for filename in preferred:
-        path = os.path.join(data_root, filename)
-        if os.path.exists(path):
-            files.append({"name": filename, "path": path})
-
-    extra_paths = conf.get("agent_extra_data_paths", []) or []
-    for extra_path in extra_paths:
-        abs_path = os.path.abspath(extra_path)
-        if os.path.exists(abs_path):
-            files.append({"name": os.path.basename(abs_path), "path": abs_path})
-    return data_root, files
-
-
-def parse_json_from_text(text):
-    text = str(text or "").strip()
-    if not text:
-        return None
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
-
-    fenced = re.search(r"```(?:json)?\s*(.*?)```", text, flags=re.DOTALL | re.IGNORECASE)
-    if fenced:
-        try:
-            return json.loads(fenced.group(1).strip())
-        except json.JSONDecodeError:
-            pass
-
-    start = text.find("{")
-    end = text.rfind("}")
-    if start >= 0 and end > start:
-        try:
-            return json.loads(text[start : end + 1])
-        except json.JSONDecodeError:
-            return None
-    return None
-
-
-def extract_python_code(text):
-    text = str(text or "")
-    fenced = re.search(r"```(?:python|py)?\s*(.*?)```", text, flags=re.DOTALL | re.IGNORECASE)
-    if fenced:
-        return fenced.group(1).strip()
-    return text.strip()
-
-
-def compact_json(value):
-    return json.dumps(value, ensure_ascii=False, sort_keys=True)
-
-
-def candidate_labels(sample):
-    return [letter for letter, _ in parse_candidate_options(sample["target_str"])]
-
-
-def generate_agent_planning_prompt(conf, sample):
-    data_root, available_files = list_agent_available_files(conf)
-    sample_view = build_agent_sample_view(sample)
-    return (
-        "You are the planning agent for a bundle completion research system.\n"
-        "Your job is to decide what evidence should be retrieved for this single test instance. "
-        "Do not choose the final answer.\n\n"
-        "Current sample JSON:\n"
-        f"{json.dumps(sample_view, ensure_ascii=False, indent=2)}\n\n"
-        "Available raw data files. The later code-writing agent may inspect these files only:\n"
-        f"{json.dumps({'data_root': data_root, 'files': available_files}, ensure_ascii=False, indent=2)}\n\n"
-        "Important restrictions:\n"
-        "- Do not use or request bi_full.txt, any test/validation ground-truth file such as bi_test_gt.txt, or any true labels.\n"
-        "- Do not use prior result CSV files, predictions, hits, or true option labels.\n"
-        "- Prefer sample-specific evidence. Different samples may need different data sources.\n\n"
-        "Return only valid JSON using this schema:\n"
-        "{\n"
-        '  "sample_diagnosis": "...",\n'
-        '  "planned_sources": ["item_info", "bi_train", "ui_full", "text_embeddings"],\n'
-        '  "avoid_sources": ["..."],\n'
-        '  "analysis_tasks": ["..."],\n'
-        '  "expected_evidence_format": "candidate-level evidence with numeric signals when possible"\n'
-        "}\n"
-    )
-
-
-def generate_agent_code_prompt(conf, sample, planning_text):
-    data_root, available_files = list_agent_available_files(conf)
-    sample_view = build_agent_sample_view(sample)
-    max_stdout_chars = int(conf.get("agent_code_max_stdout_chars", 20000))
-    labels = candidate_labels(sample)
-    return (
-        "You are the code-writing retrieval agent for a bundle completion task.\n"
-        "Write Python code that retrieves and analyzes evidence for the current sample. "
-        "The code must print exactly one JSON object to stdout and must not print anything else.\n\n"
-        "Planning agent output:\n"
-        f"{planning_text}\n\n"
-        "Current sample JSON:\n"
-        f"{json.dumps(sample_view, ensure_ascii=False, indent=2)}\n\n"
-        "Available raw data files:\n"
-        f"{json.dumps({'data_root': data_root, 'files': available_files}, ensure_ascii=False, indent=2)}\n\n"
-        "Rules:\n"
-        "- You may use Python standard library and installed scientific packages if available.\n"
-        "- You may compute co-affiliation from bi_train.txt, co-purchase from ui_full.txt, and cosine similarity from embedding files if you can load them.\n"
-        "- Do not read bi_full.txt, bi_test_gt.txt, validation/test ground truth files, result CSV files, or any file containing predictions/hits/true labels.\n"
-        "- Do not use item_cf_feature.pt unless it is explicitly listed in the available raw data files.\n"
-        "- Be robust: if a source cannot be loaded, record that in warnings and continue.\n"
-        f"- Keep the printed JSON under about {max_stdout_chars} characters.\n"
-        "- Do not choose the final answer as a separate act; only provide evidence and optional preliminary evidence ranking.\n"
-        f"- Include every candidate label exactly once: {', '.join(labels)}.\n\n"
-        "The printed JSON must follow this schema:\n"
-        "{\n"
-        '  "executed_code_summary": "...",\n'
-        '  "sources_used": ["item_info", "bi_train"],\n'
-        '  "global_findings": ["..."],\n'
-        '  "candidate_evidence": {\n'
-        '    "A": {\n'
-        '      "metadata_summary": "...",\n'
-        '      "evidence_for": ["..."],\n'
-        '      "evidence_against": ["..."],\n'
-        '      "bi_evidence": "...",\n'
-        '      "ui_evidence": "...",\n'
-        '      "embedding_evidence": "...",\n'
-        '      "overall_evidence": "..."\n'
-        "    }\n"
-        "  },\n"
-        '  "numeric_signals": {\n'
-        '    "A": {\n'
-        '      "bi_coaffiliation_count": null,\n'
-        '      "ui_copurchase_count": null,\n'
-        '      "embedding_avg_cosine": null,\n'
-        '      "embedding_max_cosine": null,\n'
-        '      "train_popularity_count": null\n'
-        "    }\n"
-        "  },\n"
-        '  "warnings": ["..."]\n'
-        "}\n\n"
-        "Return only the Python code. Do not wrap it in explanation."
-    )
-
-
-def generate_agent_code_repair_prompt(conf, sample, planning_text, previous_code, execution_result):
-    _, available_files = list_agent_available_files(conf)
-    sample_view = build_agent_sample_view(sample)
-    labels = candidate_labels(sample)
-    return (
-        "You are repairing Python retrieval code for a bundle completion task.\n"
-        "The previous code failed or did not print valid JSON. Write a corrected complete Python script.\n"
-        "Print exactly one JSON object to stdout and nothing else.\n\n"
-        "Current sample JSON:\n"
-        f"{json.dumps(sample_view, ensure_ascii=False, indent=2)}\n\n"
-        "Planning agent output:\n"
-        f"{planning_text}\n\n"
-        "Available raw data files:\n"
-        f"{json.dumps({'files': available_files}, ensure_ascii=False, indent=2)}\n\n"
-        "Previous code:\n"
-        f"```python\n{previous_code[:12000]}\n```\n\n"
-        "Execution result:\n"
-        f"{json.dumps(execution_result, ensure_ascii=False, indent=2)}\n\n"
-        "Repair requirements:\n"
-        "- Do not read bi_full.txt, bi_test_gt.txt, validation/test ground truth files, result CSV files, or true labels.\n"
-        "- Use robust fallbacks if optional embedding files cannot be loaded.\n"
-        f"- Include every candidate label exactly once: {', '.join(labels)}.\n"
-        "- Keep candidate_evidence with metadata_summary, evidence_for, evidence_against, bi_evidence, ui_evidence, embedding_evidence, and overall_evidence.\n"
-        "- Keep numeric_signals with bi_coaffiliation_count, ui_copurchase_count, embedding_avg_cosine, embedding_max_cosine, and train_popularity_count.\n\n"
-        "Return only the corrected Python code."
-    )
-
-
-def execute_generated_python_code(code, conf):
-    timeout = int(conf.get("agent_code_timeout_seconds", 30))
-    max_stdout_chars = int(conf.get("agent_code_max_stdout_chars", 20000))
-    max_stderr_chars = int(conf.get("agent_code_max_stderr_chars", 8000))
-    with tempfile.TemporaryDirectory(prefix="bundle_agent_code_") as tmpdir:
-        script_path = os.path.join(tmpdir, "agent_retrieval.py")
-        with open(script_path, "w", encoding="utf-8") as f:
-            f.write(code)
-            f.write("\n")
-
-        env = os.environ.copy()
-        env["PYTHONIOENCODING"] = "utf-8"
-        try:
-            completed = subprocess.run(
-                [sys.executable, script_path],
-                cwd=os.getcwd(),
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=timeout,
-                env=env,
-            )
-            stdout = completed.stdout[-max_stdout_chars:]
-            stderr = completed.stderr[-max_stderr_chars:]
-            return {
-                "returncode": completed.returncode,
-                "stdout": stdout,
-                "stderr": stderr,
-                "timed_out": False,
-            }
-        except subprocess.TimeoutExpired as exc:
-            return {
-                "returncode": None,
-                "stdout": (exc.stdout or "")[-max_stdout_chars:] if isinstance(exc.stdout, str) else "",
-                "stderr": (exc.stderr or "")[-max_stderr_chars:] if isinstance(exc.stderr, str) else "",
-                "timed_out": True,
-            }
-
-
-def code_execution_needs_repair(execution_result):
-    if execution_result.get("timed_out"):
-        return True
-    if execution_result.get("returncode") != 0:
-        return True
-    return parse_json_from_text(execution_result.get("stdout", "")) is None
-
-
-def generate_agent_prediction_prompt(conf, sample, planning_text, code_text, execution_result):
-    sample_view = build_agent_sample_view(sample)
-    labels = candidate_labels(sample)
-    evidence_json = parse_json_from_text(execution_result.get("stdout", ""))
-    evidence_text = (
-        json.dumps(evidence_json, ensure_ascii=False, indent=2)
-        if evidence_json is not None
-        else execution_result.get("stdout", "")
-    )
-    return (
-        "You are the final prediction agent for a bundle completion task.\n"
-        "Use the original sample and the retrieved evidence to choose one candidate letter. "
-        "Do not assume the retrieval evidence is always reliable; weigh semantic metadata, interaction evidence, and embedding evidence carefully. "
-        "Compare both evidence_for and evidence_against for each candidate, and avoid choosing a candidate only because one numeric signal is high.\n\n"
-        "Current sample JSON:\n"
-        f"{json.dumps(sample_view, ensure_ascii=False, indent=2)}\n\n"
-        "Planning agent output:\n"
-        f"{planning_text}\n\n"
-        "Executed retrieval code:\n"
-        f"```python\n{code_text[:12000]}\n```\n\n"
-        "Code execution result:\n"
-        f"{json.dumps({'returncode': execution_result.get('returncode'), 'stderr': execution_result.get('stderr'), 'timed_out': execution_result.get('timed_out')}, ensure_ascii=False, indent=2)}\n\n"
-        "Retrieved evidence:\n"
-        f"{evidence_text[:20000]}\n\n"
-        f"In candidate_tradeoff, include every candidate label exactly once: {', '.join(labels)}.\n"
-        "Return only valid JSON using this schema:\n"
-        "{\n"
-        '  "source_reliability_assessment": {\n'
-        '    "item_info": "high|medium|low plus short reason",\n'
-        '    "bi_train": "high|medium|low plus short reason",\n'
-        '    "ui_full": "high|medium|low plus short reason",\n'
-        '    "text_embeddings": "high|medium|low plus short reason"\n'
-        "  },\n"
-        '  "candidate_tradeoff": {\n'
-        '    "A": "main evidence for and against this candidate",\n'
-        '    "B": "main evidence for and against this candidate"\n'
-        "  },\n"
-        '  "decision_rule": "how you balanced semantic compatibility, collaborative evidence, embeddings, and counter-evidence",\n'
-        '  "reasoning": "concise final comparison across candidates",\n'
-        '  "prediction": "A",\n'
-        '  "confidence": "low|medium|high",\n'
-        '  "main_sources_used_for_decision": ["item_info", "bi_train"]\n'
-        "}\n"
-    )
 
 
 def is_quota_error(exc):
@@ -569,15 +282,21 @@ def save_results(results, conf, timestamp, partial=False):
         df["cfg_reasoning_api_key_env"] = conf.get("reasoning_api_key_env", "")
         df["cfg_use_candidate_reasoning"] = use_candidate_reasoning(conf)
         df["cfg_candidate_reasoning_max_output_tokens"] = conf.get("candidate_reasoning_max_output_tokens", "")
-        df["cfg_use_three_stage_agent"] = use_three_stage_agent(conf)
+        df["cfg_use_four_stage_agent"] = use_four_stage_agent(conf)
         df["cfg_agent_planning_api_key_env"] = conf.get("agent_planning_api_key_env", "")
         df["cfg_agent_code_api_key_env"] = conf.get("agent_code_api_key_env", "")
+        df["cfg_agent_verifier_api_key_env"] = conf.get("agent_verifier_api_key_env", "")
         df["cfg_agent_prediction_api_key_env"] = conf.get("agent_prediction_api_key_env", "")
         df["cfg_agent_planning_max_output_tokens"] = conf.get("agent_planning_max_output_tokens", "")
         df["cfg_agent_code_max_output_tokens"] = conf.get("agent_code_max_output_tokens", "")
+        df["cfg_agent_verifier_max_output_tokens"] = conf.get("agent_verifier_max_output_tokens", "")
         df["cfg_agent_prediction_max_output_tokens"] = conf.get("agent_prediction_max_output_tokens", "")
+        df["cfg_agent_max_retrieval_rounds"] = conf.get("agent_max_retrieval_rounds", "")
+        df["cfg_agent_workspace_root"] = conf.get("agent_workspace_root", "")
+        df["cfg_agent_evidence_output_file"] = conf.get("agent_evidence_output_file", "")
         df["cfg_agent_code_timeout_seconds"] = conf.get("agent_code_timeout_seconds", "")
         df["cfg_agent_code_max_repair_attempts"] = conf.get("agent_code_max_repair_attempts", "")
+        df["cfg_agent_enable_code_guard"] = conf.get("agent_enable_code_guard", "")
         df["cfg_agent_allowed_files"] = compact_json(conf.get("agent_allowed_files", []))
         df["cfg_agent_allow_interaction_embeddings"] = conf.get("agent_allow_interaction_embeddings", "")
         df["cfg_max_retries"] = conf.get("max_retries", "")
@@ -598,6 +317,7 @@ async def process_samples(
     reasoning_client=None,
     planning_client=None,
     code_client=None,
+    verifier_client=None,
     agent_prediction_client=None,
 ):
     results = list(initial_results or [])
@@ -609,129 +329,29 @@ async def process_samples(
         row = dict(sample)
         prompt = generate_prompt(conf["dataset"], sample["input_str"], sample["target_str"])
 
-        if use_three_stage_agent(conf):
+        if use_four_stage_agent(conf):
             async with semaphore:
-                planning_prompt = generate_agent_planning_prompt(conf, sample)
-                if current_idx == start_idx:
-                    print_llm_prompt_debug("First Agent Planning Prompt Sent To Model", planning_prompt)
                 try:
-                    planning_raw_text = await generate_content_with_retry(
-                        planning_client or prediction_client,
-                        conf["model"],
-                        planning_prompt,
+                    agent_row, prediction, raw_text = await run_four_stage_agent(
+                        sample,
                         conf,
-                        conf.get("agent_planning_max_output_tokens", 800),
-                        f"sample {current_idx + 1} agent planning",
+                        {
+                            "planning": planning_client or prediction_client,
+                            "code": code_client or prediction_client,
+                            "verifier": verifier_client or prediction_client,
+                            "prediction": agent_prediction_client or prediction_client,
+                        },
+                        generate_content_with_retry,
+                        parse_model_response,
+                        debug_callbacks={"prompt": print_llm_prompt_debug, "qa": print_first_qa_debug},
+                        is_first_sample=current_idx == start_idx,
                     )
+                    row.update(agent_row)
                 except QuotaExceededError:
                     raise
                 except Exception as exc:
-                    planning_raw_text = str(exc)
-
-                code_prompt = generate_agent_code_prompt(conf, sample, planning_raw_text)
-                if current_idx == start_idx:
-                    print_llm_prompt_debug("First Agent Code Prompt Sent To Model", code_prompt)
-                try:
-                    code_raw_text = await generate_content_with_retry(
-                        code_client or prediction_client,
-                        conf["model"],
-                        code_prompt,
-                        conf,
-                        conf.get("agent_code_max_output_tokens", 2200),
-                        f"sample {current_idx + 1} agent code writing",
-                    )
-                except QuotaExceededError:
-                    raise
-                except Exception as exc:
-                    code_raw_text = str(exc)
-
-                generated_code = extract_python_code(code_raw_text)
-                execution_result = await asyncio.to_thread(execute_generated_python_code, generated_code, conf)
-                repair_attempts_used = 0
-                repair_raw_responses = []
-                max_repair_attempts = int(conf.get("agent_code_max_repair_attempts", 1))
-
-                while code_execution_needs_repair(execution_result) and repair_attempts_used < max_repair_attempts:
-                    repair_attempts_used += 1
-                    repair_prompt = generate_agent_code_repair_prompt(
-                        conf, sample, planning_raw_text, generated_code, execution_result
-                    )
-                    if current_idx == start_idx:
-                        print_llm_prompt_debug(
-                            f"First Agent Code Repair Prompt {repair_attempts_used} Sent To Model",
-                            repair_prompt,
-                        )
-                    try:
-                        repair_raw_text = await generate_content_with_retry(
-                            code_client or prediction_client,
-                            conf["model"],
-                            repair_prompt,
-                            conf,
-                            conf.get("agent_code_max_output_tokens", 2200),
-                            f"sample {current_idx + 1} agent code repair {repair_attempts_used}",
-                        )
-                    except QuotaExceededError:
-                        raise
-                    except Exception as exc:
-                        repair_raw_text = str(exc)
-
-                    repair_raw_responses.append(repair_raw_text)
-                    generated_code = extract_python_code(repair_raw_text)
-                    execution_result = await asyncio.to_thread(execute_generated_python_code, generated_code, conf)
-
-                evidence_json = parse_json_from_text(execution_result.get("stdout", ""))
-
-                prediction_prompt = generate_agent_prediction_prompt(
-                    conf, sample, planning_raw_text, generated_code, execution_result
-                )
-                if current_idx == start_idx:
-                    print_first_qa_debug(sample, prediction_prompt)
-                try:
-                    final_raw_text = await generate_content_with_retry(
-                        agent_prediction_client or prediction_client,
-                        conf["model"],
-                        prediction_prompt,
-                        conf,
-                        conf.get("agent_prediction_max_output_tokens", 800),
-                        f"sample {current_idx + 1} agent final prediction",
-                    )
-                    final_json = parse_json_from_text(final_raw_text)
-                    if isinstance(final_json, dict) and final_json.get("prediction"):
-                        prediction = parse_model_response(str(final_json.get("prediction", "")))
-                    else:
-                        prediction = parse_model_response(final_raw_text)
-                except QuotaExceededError:
-                    raise
-                except Exception as exc:
-                    final_raw_text = str(exc)
-                    final_json = None
                     prediction = "ERR_EX"
-
-                row["agent_planning_raw_response"] = planning_raw_text
-                row["agent_planning_json"] = compact_json(parse_json_from_text(planning_raw_text))
-                row["agent_code_raw_response"] = code_raw_text
-                row["agent_code_repair_raw_responses"] = compact_json(repair_raw_responses)
-                row["agent_code_repair_attempts_used"] = repair_attempts_used
-                row["agent_generated_code"] = generated_code
-                row["agent_code_returncode"] = execution_result.get("returncode")
-                row["agent_code_stdout"] = execution_result.get("stdout", "")
-                row["agent_code_stderr"] = execution_result.get("stderr", "")
-                row["agent_code_timed_out"] = execution_result.get("timed_out", False)
-                row["agent_evidence_json"] = compact_json(evidence_json)
-                row["agent_prediction_raw_response"] = final_raw_text
-                row["agent_prediction_json"] = compact_json(final_json)
-                if isinstance(final_json, dict):
-                    row["agent_reasoning"] = final_json.get("reasoning", "")
-                    row["agent_confidence"] = final_json.get("confidence", "")
-                    row["agent_main_sources_used_for_decision"] = compact_json(
-                        final_json.get("main_sources_used_for_decision", [])
-                    )
-                    row["agent_source_reliability_assessment"] = compact_json(
-                        final_json.get("source_reliability_assessment", {})
-                    )
-                    row["agent_candidate_tradeoff"] = compact_json(final_json.get("candidate_tradeoff", {}))
-                    row["agent_decision_rule"] = final_json.get("decision_rule", "")
-                raw_text = final_raw_text
+                    raw_text = str(exc)
 
         elif use_candidate_reasoning(conf):
             options = parse_candidate_options(sample["target_str"])
@@ -875,6 +495,7 @@ def main():
         reasoning_client = None
         planning_client = None
         code_client = None
+        verifier_client = None
         agent_prediction_client = None
         if use_candidate_reasoning(conf):
             reasoning_api_key, reasoning_api_key_env = resolve_api_key(
@@ -885,7 +506,7 @@ def main():
             reasoning_client = genai.Client(api_key=reasoning_api_key)
             print(f">>> Reasoning API key env: {reasoning_api_key_env}")
 
-        if use_three_stage_agent(conf):
+        if use_four_stage_agent(conf):
             planning_api_key, planning_api_key_env = resolve_api_key(
                 conf,
                 "agent_planning_api_key_env",
@@ -896,6 +517,11 @@ def main():
                 "agent_code_api_key_env",
                 [planning_api_key_env, prediction_api_key_env, "GEMINI_API_KEY", "GOOGLE_API_KEY"],
             )
+            verifier_api_key, verifier_api_key_env = resolve_api_key(
+                conf,
+                "agent_verifier_api_key_env",
+                [planning_api_key_env, prediction_api_key_env, "GEMINI_API_KEY", "GOOGLE_API_KEY"],
+            )
             agent_prediction_api_key, agent_prediction_api_key_env = resolve_api_key(
                 conf,
                 "agent_prediction_api_key_env",
@@ -903,9 +529,11 @@ def main():
             )
             planning_client = genai.Client(api_key=planning_api_key)
             code_client = genai.Client(api_key=code_api_key)
+            verifier_client = genai.Client(api_key=verifier_api_key)
             agent_prediction_client = genai.Client(api_key=agent_prediction_api_key)
             print(f">>> Agent planning API key env: {planning_api_key_env}")
             print(f">>> Agent code API key env: {code_api_key_env}")
+            print(f">>> Agent verifier API key env: {verifier_api_key_env}")
             print(f">>> Agent prediction API key env: {agent_prediction_api_key_env}")
     except ValueError as exc:
         print(f"[Error] {exc}")
@@ -923,6 +551,7 @@ def main():
                 reasoning_client=reasoning_client,
                 planning_client=planning_client,
                 code_client=code_client,
+                verifier_client=verifier_client,
                 agent_prediction_client=agent_prediction_client,
             )
         )
