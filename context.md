@@ -94,6 +94,51 @@ Choice:
 
 The final raw response is stored in `raw_response`, the parsed answer in `prediction`, and correctness in `hit`.
 
+## Three-Stage Code-Writing Agent Method
+
+The three-stage agent method is active when:
+
+```yaml
+use_three_stage_agent: true
+```
+
+This mode is mutually prioritized over the baseline and candidate reasoning branches. Each sample uses three LLM stages:
+
+1. Planning agent: reads the current input/candidate item ids and texts, plus available raw data paths, then decides what evidence should be retrieved.
+2. Code-writing retrieval agent: writes Python code that inspects allowed raw files such as `item_info.json`, `bi_train.txt`, `ui_full.txt`, and optional text/content embedding cache files. The generated code must print one JSON evidence object with standardized candidate-level `evidence_for`, `evidence_against`, and numeric signals.
+3. Prediction agent: receives the original sample, planning output, generated code, code execution result, and retrieved evidence, then returns final JSON with `source_reliability_assessment`, `candidate_tradeoff`, `decision_rule`, `prediction`, `reasoning`, `confidence`, and `main_sources_used_for_decision`.
+
+The runner executes generated code with the same Python executable that launched `src/main.py`, stores stdout/stderr, and continues even if optional evidence sources cannot be loaded. If generated code fails or does not print valid JSON, the code-writing agent receives stdout/stderr and can repair the script up to `agent_code_max_repair_attempts`.
+
+Stage-specific API key config:
+
+```yaml
+agent_planning_api_key_env: ""
+agent_code_api_key_env: ""
+agent_prediction_api_key_env: ""
+```
+
+Empty stage key settings fall back to the prediction key env and then `GEMINI_API_KEY` or `GOOGLE_API_KEY`.
+
+Default allowed files are train-safe:
+
+```yaml
+agent_allowed_files:
+  - count.json
+  - item_info.json
+  - bi_train.txt
+  - ui_full.txt
+  - content_feature.pt
+  - description_feature.pt
+agent_allow_interaction_embeddings: false
+```
+
+`bi_full.txt` and `item_cf_feature.pt` are excluded by default. `item_cf_feature.pt` is exposed only when `agent_allow_interaction_embeddings: true`, because its train-only provenance should be checked before use.
+
+Important leakage rule: prompts instruct the agent not to read `bi_full.txt`, `bi_test_gt.txt`, validation/test ground-truth files, result CSVs, predictions, hits, or true labels. The current prototype exposes allowed raw data paths in the prompt, but does not yet enforce a filesystem sandbox around generated code.
+
+Result CSVs store planning/code/prediction traces including `agent_planning_raw_response`, `agent_generated_code`, `agent_code_stdout`, `agent_code_stderr`, `agent_code_repair_attempts_used`, `agent_evidence_json`, `agent_prediction_raw_response`, `agent_reasoning`, `agent_confidence`, `agent_source_reliability_assessment`, `agent_candidate_tradeoff`, and `agent_decision_rule`.
+
 ## Result Saving and Resume
 
 The runner saves one CSV row per fully completed sample.
