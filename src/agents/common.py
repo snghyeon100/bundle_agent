@@ -53,10 +53,24 @@ def parse_json_from_text(text):
 
 
 def extract_python_code(text):
-    text = str(text or "")
+    text = str(text or "").strip()
     fenced = re.search(r"```(?:python|py)?\s*(.*?)```", text, flags=re.DOTALL | re.IGNORECASE)
     if fenced:
         return fenced.group(1).strip()
+
+    lines = text.splitlines()
+    if lines and re.match(r"^\s*```(?:python|py)?\s*$", lines[0], flags=re.IGNORECASE):
+        lines = lines[1:]
+    if lines and re.match(r"^\s*```\s*$", lines[-1]):
+        lines = lines[:-1]
+    text = "\n".join(lines).strip()
+
+    code_start = re.search(
+        r"(?m)^(?:#!.*python.*|import\s+\w+|from\s+\w+\s+import\s+|def\s+\w+\s*\(|class\s+\w+\s*[:(])",
+        text,
+    )
+    if code_start:
+        text = text[code_start.start() :]
     return text.strip()
 
 

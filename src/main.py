@@ -13,6 +13,7 @@ from google import genai
 from agents.common import compact_json
 from agents.pipeline import run_four_stage_agent
 from dataset import BundleZeroShotDataset, set_seed
+from two_stage_agent.pipeline import run_two_stage_agent
 
 
 class QuotaExceededError(RuntimeError):
@@ -44,7 +45,13 @@ def use_four_stage_agent(conf):
     return bool(conf.get("use_four_stage_agent", False))
 
 
+def use_two_stage_agent(conf):
+    return bool(conf.get("use_two_stage_agent", False))
+
+
 def method_name(conf):
+    if use_two_stage_agent(conf):
+        return "two_stage_agent"
     if use_four_stage_agent(conf):
         return "four_stage_agent"
     if use_candidate_reasoning(conf):
@@ -135,12 +142,17 @@ async def call_llm_once(client, model, contents, conf, max_output_tokens):
         return response.text or ""
 
     if provider == "openai":
-        response = await client.responses.create(
-            model=model,
-            input=contents,
-            temperature=float(conf.get("temperature", 0.0)),
-            max_output_tokens=int(max_output_tokens),
-        )
+        request = {
+            "model": model,
+            "input": contents,
+            "max_output_tokens": int(max_output_tokens),
+        }
+        reasoning_effort = str(conf.get("openai_reasoning_effort", "")).strip()
+        if reasoning_effort:
+            request["reasoning"] = {"effort": reasoning_effort}
+        if bool(conf.get("openai_send_temperature", False)):
+            request["temperature"] = float(conf.get("temperature", 0.0))
+        response = await client.responses.create(**request)
         return getattr(response, "output_text", "") or ""
 
     raise ValueError(f"Unsupported llm_provider: {provider}")
@@ -321,6 +333,7 @@ def save_results(results, conf, timestamp, partial=False):
         df["cfg_reasoning_api_key_env"] = conf.get("reasoning_api_key_env", "")
         df["cfg_use_candidate_reasoning"] = use_candidate_reasoning(conf)
         df["cfg_candidate_reasoning_max_output_tokens"] = conf.get("candidate_reasoning_max_output_tokens", "")
+        df["cfg_use_two_stage_agent"] = use_two_stage_agent(conf)
         df["cfg_use_four_stage_agent"] = use_four_stage_agent(conf)
         df["cfg_agent_planning_api_key_env"] = conf.get("agent_planning_api_key_env", "")
         df["cfg_agent_code_api_key_env"] = conf.get("agent_code_api_key_env", "")
@@ -368,7 +381,29 @@ async def process_samples(
         row = dict(sample)
         prompt = generate_prompt(conf["dataset"], sample["input_str"], sample["target_str"])
 
-        if use_four_stage_agent(conf):
+        if use_two_stage_agent(conf):
+            async with semaphore:
+                try:
+                    agent_row, prediction, raw_text = await run_two_stage_agent(
+                        sample,
+                        conf,
+                        {
+                            "code": code_client or prediction_client,
+                            "prediction": agent_prediction_client or prediction_client,
+                        },
+                        generate_content_with_retry,
+                        parse_model_response,
+                        debug_callbacks={"prompt": print_llm_prompt_debug, "qa": print_first_qa_debug},
+                        is_first_sample=current_idx == start_idx,
+                    )
+                    row.update(agent_row)
+                except QuotaExceededError:
+                    raise
+                except Exception as exc:
+                    prediction = "ERR_EX"
+                    raw_text = str(exc)
+
+        elif use_four_stage_agent(conf):
             async with semaphore:
                 try:
                     agent_row, prediction, raw_text = await run_four_stage_agent(
@@ -547,7 +582,23 @@ def main():
             reasoning_client = create_llm_client(conf, reasoning_api_key)
             print(f">>> Reasoning API key env: {reasoning_api_key_env}")
 
-        if use_four_stage_agent(conf):
+        if use_two_stage_agent(conf):
+            code_api_key, code_api_key_env = resolve_api_key(
+                conf,
+                "agent_code_api_key_env",
+                [prediction_api_key_env] + provider_fallback_envs,
+            )
+            agent_prediction_api_key, agent_prediction_api_key_env = resolve_api_key(
+                conf,
+                "agent_prediction_api_key_env",
+                [prediction_api_key_env, code_api_key_env] + provider_fallback_envs,
+            )
+            code_client = create_llm_client(conf, code_api_key)
+            agent_prediction_client = create_llm_client(conf, agent_prediction_api_key)
+            print(f">>> Two-stage code API key env: {code_api_key_env}")
+            print(f">>> Two-stage prediction API key env: {agent_prediction_api_key_env}")
+
+        elif use_four_stage_agent(conf):
             planning_api_key, planning_api_key_env = resolve_api_key(
                 conf,
                 "agent_planning_api_key_env",

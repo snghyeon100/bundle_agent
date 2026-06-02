@@ -239,6 +239,8 @@ OpenAI example `config.yaml`:
 ```yaml
 llm_provider: openai
 model: gpt-4o
+openai_send_temperature: false
+openai_reasoning_effort: minimal
 prediction_api_key_env: OPENAI_API_KEY
 reasoning_api_key_env: OPENAI_API_KEY
 agent_planning_api_key_env: OPENAI_API_KEY
@@ -246,6 +248,10 @@ agent_code_api_key_env: OPENAI_API_KEY
 agent_verifier_api_key_env: OPENAI_API_KEY
 agent_prediction_api_key_env: OPENAI_API_KEY
 ```
+
+For OpenAI, `openai_send_temperature` defaults to false in practice and should stay false for GPT-5 models because some GPT-5 models reject the `temperature` parameter. Set it to true only for OpenAI models that support temperature and when temperature control is needed.
+
+For GPT-5 models, `openai_reasoning_effort: minimal` is recommended for this multi-call agent by default. Higher reasoning effort can consume the configured `max_output_tokens` budget before visible text is produced, especially in code-writing and verifier stages.
 
 ## Reproducibility
 
