@@ -335,6 +335,8 @@ def save_results(results, conf, timestamp, partial=False):
         df["cfg_candidate_reasoning_max_output_tokens"] = conf.get("candidate_reasoning_max_output_tokens", "")
         df["cfg_use_two_stage_agent"] = use_two_stage_agent(conf)
         df["cfg_use_four_stage_agent"] = use_four_stage_agent(conf)
+        df["cfg_two_stage_code_api_key_env"] = conf.get("two_stage_code_api_key_env", "")
+        df["cfg_two_stage_prediction_api_key_env"] = conf.get("two_stage_prediction_api_key_env", "")
         df["cfg_agent_planning_api_key_env"] = conf.get("agent_planning_api_key_env", "")
         df["cfg_agent_code_api_key_env"] = conf.get("agent_code_api_key_env", "")
         df["cfg_agent_verifier_api_key_env"] = conf.get("agent_verifier_api_key_env", "")
@@ -585,12 +587,12 @@ def main():
         if use_two_stage_agent(conf):
             code_api_key, code_api_key_env = resolve_api_key(
                 conf,
-                "agent_code_api_key_env",
+                "two_stage_code_api_key_env",
                 [prediction_api_key_env] + provider_fallback_envs,
             )
             agent_prediction_api_key, agent_prediction_api_key_env = resolve_api_key(
                 conf,
-                "agent_prediction_api_key_env",
+                "two_stage_prediction_api_key_env",
                 [prediction_api_key_env, code_api_key_env] + provider_fallback_envs,
             )
             code_client = create_llm_client(conf, code_api_key)
