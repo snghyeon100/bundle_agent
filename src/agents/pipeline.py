@@ -1,4 +1,5 @@
 import asyncio
+import re
 
 from agents.common import compact_json, extract_python_code, parse_json_from_text
 from agents.planner import generate_planning_prompt
@@ -48,6 +49,17 @@ def compact_round_for_llm(round_data):
         "evidence": round_data.get("evidence_json"),
         "verifier": round_data.get("verifier_json"),
     }
+
+
+def parse_prediction_from_jsonish_text(text, prediction_parser):
+    match = re.search(
+        r'["\']prediction["\']\s*:\s*["\']?([A-Z])["\']?',
+        str(text or ""),
+        flags=re.IGNORECASE,
+    )
+    if match:
+        return prediction_parser(match.group(1))
+    return prediction_parser(text)
 
 
 async def run_code_with_repairs(
@@ -230,7 +242,7 @@ async def run_four_stage_agent(
     if isinstance(final_json, dict) and final_json.get("prediction"):
         prediction = prediction_parser(str(final_json.get("prediction", "")))
     else:
-        prediction = prediction_parser(final_raw_text)
+        prediction = parse_prediction_from_jsonish_text(final_raw_text, prediction_parser)
 
     row_updates = {
         "agent_workspace_dir": workspace["workspace_dir"],
