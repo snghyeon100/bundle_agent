@@ -202,26 +202,49 @@ Quota or permission errors such as `403`, quota, resource exhausted, permission 
 Config:
 
 ```yaml
+llm_provider: gemini
+model: gemini-3.1-flash-lite
 prediction_api_key_env: ""
 reasoning_api_key_env: ""
 ```
 
-If `prediction_api_key_env` is empty, the runner uses `GEMINI_API_KEY` or `GOOGLE_API_KEY`.
+`llm_provider` selects the backend used by the shared LLM adapter:
 
-If `reasoning_api_key_env` is empty, the runner falls back to the prediction key env and then `GEMINI_API_KEY` or `GOOGLE_API_KEY`.
+- `gemini`: uses the Google GenAI SDK and defaults to `GEMINI_API_KEY` or `GOOGLE_API_KEY`.
+- `openai`: uses the OpenAI SDK and defaults to `OPENAI_API_KEY`.
+
+If `prediction_api_key_env` is empty, the runner uses the provider default envs.
+
+If `reasoning_api_key_env` is empty, the runner falls back to the prediction key env and then the provider default envs.
 
 Example `.env`:
 
 ```env
 GEMINI_REASONING_API_KEY=...
 GEMINI_PREDICTION_API_KEY=...
+OPENAI_API_KEY=...
 ```
 
-Example `config.yaml`:
+Gemini example `config.yaml`:
 
 ```yaml
+llm_provider: gemini
+model: gemini-3.1-flash-lite
 prediction_api_key_env: GEMINI_PREDICTION_API_KEY
 reasoning_api_key_env: GEMINI_REASONING_API_KEY
+```
+
+OpenAI example `config.yaml`:
+
+```yaml
+llm_provider: openai
+model: gpt-4o
+prediction_api_key_env: OPENAI_API_KEY
+reasoning_api_key_env: OPENAI_API_KEY
+agent_planning_api_key_env: OPENAI_API_KEY
+agent_code_api_key_env: OPENAI_API_KEY
+agent_verifier_api_key_env: OPENAI_API_KEY
+agent_prediction_api_key_env: OPENAI_API_KEY
 ```
 
 ## Reproducibility

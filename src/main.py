@@ -52,6 +52,27 @@ def method_name(conf):
     return "baseline"
 
 
+def llm_provider(conf):
+    return str(conf.get("llm_provider", "gemini")).strip().lower()
+
+
+def default_api_key_envs(conf):
+    if llm_provider(conf) == "openai":
+        return ["OPENAI_API_KEY"]
+    return ["GEMINI_API_KEY", "GOOGLE_API_KEY"]
+
+
+def create_llm_client(conf, api_key):
+    provider = llm_provider(conf)
+    if provider == "gemini":
+        return genai.Client(api_key=api_key)
+    if provider == "openai":
+        from openai import AsyncOpenAI
+
+        return AsyncOpenAI(api_key=api_key)
+    raise ValueError(f"Unsupported llm_provider: {provider}")
+
+
 def resolve_api_key(conf, config_key, fallback_envs):
     env_name = str(conf.get(config_key, "")).strip()
     if env_name:
@@ -100,21 +121,38 @@ def is_retryable_error(exc):
     return any(marker in message for marker in retry_markers)
 
 
+async def call_llm_once(client, model, contents, conf, max_output_tokens):
+    provider = llm_provider(conf)
+    if provider == "gemini":
+        response = await client.aio.models.generate_content(
+            model=model,
+            contents=contents,
+            config={
+                "temperature": float(conf.get("temperature", 0.0)),
+                "max_output_tokens": int(max_output_tokens),
+            },
+        )
+        return response.text or ""
+
+    if provider == "openai":
+        response = await client.responses.create(
+            model=model,
+            input=contents,
+            temperature=float(conf.get("temperature", 0.0)),
+            max_output_tokens=int(max_output_tokens),
+        )
+        return getattr(response, "output_text", "") or ""
+
+    raise ValueError(f"Unsupported llm_provider: {provider}")
+
+
 async def generate_content_with_retry(client, model, contents, conf, max_output_tokens, step_name):
     max_retries = int(conf.get("max_retries", 5))
     retry_wait_seconds = float(conf.get("retry_wait_seconds", 30))
 
     for attempt in range(max_retries + 1):
         try:
-            response = await client.aio.models.generate_content(
-                model=model,
-                contents=contents,
-                config={
-                    "temperature": float(conf.get("temperature", 0.0)),
-                    "max_output_tokens": int(max_output_tokens),
-                },
-            )
-            return response.text or ""
+            return await call_llm_once(client, model, contents, conf, max_output_tokens)
         except Exception as exc:
             if is_quota_error(exc):
                 raise QuotaExceededError(f"Quota or permission error during {step_name}: {exc}") from exc
@@ -277,6 +315,7 @@ def save_results(results, conf, timestamp, partial=False):
         df["cfg_seed"] = conf.get("seed", "")
         df["cfg_shuffle_seed"] = conf.get("shuffle_seed", "")
         df["cfg_model"] = conf.get("model", "")
+        df["cfg_llm_provider"] = llm_provider(conf)
         df["cfg_temperature"] = conf.get("temperature", "")
         df["cfg_prediction_api_key_env"] = conf.get("prediction_api_key_env", "")
         df["cfg_reasoning_api_key_env"] = conf.get("reasoning_api_key_env", "")
@@ -484,12 +523,14 @@ def main():
     print(f">>> Total test samples prepared: {len(samples)} (start_idx={args.start_idx})")
 
     try:
+        provider_fallback_envs = default_api_key_envs(conf)
         prediction_api_key, prediction_api_key_env = resolve_api_key(
             conf,
             "prediction_api_key_env",
-            ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+            provider_fallback_envs,
         )
-        prediction_client = genai.Client(api_key=prediction_api_key)
+        prediction_client = create_llm_client(conf, prediction_api_key)
+        print(f">>> LLM provider: {llm_provider(conf)}")
         print(f">>> Prediction API key env: {prediction_api_key_env}")
 
         reasoning_client = None
@@ -501,36 +542,36 @@ def main():
             reasoning_api_key, reasoning_api_key_env = resolve_api_key(
                 conf,
                 "reasoning_api_key_env",
-                [prediction_api_key_env, "GEMINI_API_KEY", "GOOGLE_API_KEY"],
+                [prediction_api_key_env] + provider_fallback_envs,
             )
-            reasoning_client = genai.Client(api_key=reasoning_api_key)
+            reasoning_client = create_llm_client(conf, reasoning_api_key)
             print(f">>> Reasoning API key env: {reasoning_api_key_env}")
 
         if use_four_stage_agent(conf):
             planning_api_key, planning_api_key_env = resolve_api_key(
                 conf,
                 "agent_planning_api_key_env",
-                [prediction_api_key_env, "GEMINI_API_KEY", "GOOGLE_API_KEY"],
+                [prediction_api_key_env] + provider_fallback_envs,
             )
             code_api_key, code_api_key_env = resolve_api_key(
                 conf,
                 "agent_code_api_key_env",
-                [planning_api_key_env, prediction_api_key_env, "GEMINI_API_KEY", "GOOGLE_API_KEY"],
+                [planning_api_key_env, prediction_api_key_env] + provider_fallback_envs,
             )
             verifier_api_key, verifier_api_key_env = resolve_api_key(
                 conf,
                 "agent_verifier_api_key_env",
-                [planning_api_key_env, prediction_api_key_env, "GEMINI_API_KEY", "GOOGLE_API_KEY"],
+                [planning_api_key_env, prediction_api_key_env] + provider_fallback_envs,
             )
             agent_prediction_api_key, agent_prediction_api_key_env = resolve_api_key(
                 conf,
                 "agent_prediction_api_key_env",
-                [prediction_api_key_env, planning_api_key_env, "GEMINI_API_KEY", "GOOGLE_API_KEY"],
+                [prediction_api_key_env, planning_api_key_env] + provider_fallback_envs,
             )
-            planning_client = genai.Client(api_key=planning_api_key)
-            code_client = genai.Client(api_key=code_api_key)
-            verifier_client = genai.Client(api_key=verifier_api_key)
-            agent_prediction_client = genai.Client(api_key=agent_prediction_api_key)
+            planning_client = create_llm_client(conf, planning_api_key)
+            code_client = create_llm_client(conf, code_api_key)
+            verifier_client = create_llm_client(conf, verifier_api_key)
+            agent_prediction_client = create_llm_client(conf, agent_prediction_api_key)
             print(f">>> Agent planning API key env: {planning_api_key_env}")
             print(f">>> Agent code API key env: {code_api_key_env}")
             print(f">>> Agent verifier API key env: {verifier_api_key_env}")

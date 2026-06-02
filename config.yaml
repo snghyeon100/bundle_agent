@@ -10,20 +10,24 @@ seed: 45                    # seed for candidate items
 shuffle_seed: 41            # seed for input item order
 
 # LLM
+llm_provider: gemini          # gemini | openai
 model: gemini-3.1-flash-lite
+# OpenAI example:
+# llm_provider: openai
+# model: gpt-4o
 temperature: 0.0
 max_output_tokens: 10
-prediction_api_key_env: ""       # empty = GEMINI_API_KEY or GOOGLE_API_KEY
-reasoning_api_key_env: ""        # empty = prediction key env, GEMINI_API_KEY, or GOOGLE_API_KEY
+prediction_api_key_env: ""       # empty = provider default envs (Gemini: GEMINI_API_KEY/GOOGLE_API_KEY, OpenAI: OPENAI_API_KEY)
+reasoning_api_key_env: ""        # empty = prediction key env, then provider default envs
 use_candidate_reasoning: false
 candidate_reasoning_max_output_tokens: 1200
 
 # Four-stage code-writing agent
 use_four_stage_agent: true
-agent_planning_api_key_env: "GEMINI_API_KEY_1"       # empty = prediction key env, GEMINI_API_KEY, or GOOGLE_API_KEY
-agent_code_api_key_env: "GEMINI_API_KEY_3"           # empty = planning/prediction key env, GEMINI_API_KEY, or GOOGLE_API_KEY
-agent_verifier_api_key_env: "GEMINI_API_KEY_3"       # empty = planning/prediction key env, GEMINI_API_KEY, or GOOGLE_API_KEY
-agent_prediction_api_key_env: "GEMINI_API_KEY_4"     # empty = prediction/planning key env, GEMINI_API_KEY, or GOOGLE_API_KEY
+agent_planning_api_key_env: "GEMINI_API_KEY_1"       # empty = prediction key env, then provider default envs
+agent_code_api_key_env: "GEMINI_API_KEY_3"           # empty = planning/prediction key env, then provider default envs
+agent_verifier_api_key_env: "GEMINI_API_KEY_3"       # empty = planning/prediction key env, then provider default envs
+agent_prediction_api_key_env: "GEMINI_API_KEY_4"     # empty = prediction/planning key env, then provider default envs
 agent_planning_max_output_tokens: 1600
 agent_code_max_output_tokens: 2200
 agent_verifier_max_output_tokens: 800
