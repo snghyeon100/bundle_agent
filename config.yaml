@@ -1,11 +1,11 @@
 # Dataset
-dataset: pog          # pog | pog_dense | spotify | spotify_sparse
+dataset: pog_dense          # pog | pog_dense | spotify | spotify_sparse
 data_path: ./datasets
 
 # Evaluation
 num_cans: 10                # number of candidates including the answer
 num_token: 5                # max input items per bundle (-1 = no limit)
-toy_eval: 2               # -1 = full test set | N = first N samples
+toy_eval: 250               # -1 = full test set | N = first N samples
 seed: 45                    # seed for candidate items
 shuffle_seed: 41            # seed for input item order
 
@@ -26,9 +26,8 @@ candidate_reasoning_max_output_tokens: 1200
 
 # Two-stage code retrieval agent
 use_two_stage_agent: true
-two_stage_code_api_key_env: "GEMINI_API_KEY"         # active only when use_two_stage_agent is true
-two_stage_prediction_api_key_env: "GEMINI_API_KEY"   # active only when use_two_stage_agent is true
-
+two_stage_code_api_key_env: "GEMINI_API_KEY_3"         # active only when use_two_stage_agent is true
+two_stage_prediction_api_key_env: "GEMINI_API_KEY_4"   # active only when use_two_stage_agent is true
 # Four-stage code-writing agent
 use_four_stage_agent: false
 agent_planning_api_key_env: "OPENAI_API_KEY"       # four-stage only: empty = prediction key env, then provider default envs

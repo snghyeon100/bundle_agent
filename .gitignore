@@ -17,6 +17,8 @@ results/**
 !results/.gitkeep
 datasets/
 agent_workspaces/
+logs/**
+scripts/**
 
 # IDE and OS files
 .vscode/

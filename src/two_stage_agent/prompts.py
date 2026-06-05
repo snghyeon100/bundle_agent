@@ -31,6 +31,15 @@ def dataset_format_contract(dataset_name, workspace):
         "- In the inspected local datasets these are torch.Tensor matrices with first dimension equal to item count and feature dimension 768.\n"
         "- If a tensor loads and candidate/input ids are valid integer indexes, compute cosine similarity between each candidate vector and the mean input vector.\n"
         "- If torch or a tensor file is unavailable, record null values and a warning instead of failing.\n"
+        "\n"
+        "data/ui_item_embeddings.pt and data/bi_item_embeddings.pt:\n"
+        "- Optional manually staged LightGCN item embedding caches. These files may exist under data/ even if they are not listed in Available copied files.\n"
+        "- ui_item_embeddings.pt is trained on the UI user-item graph from ui_full.txt.\n"
+        "- bi_item_embeddings.pt is trained on the BI train bundle-item graph from bi_train.txt.\n"
+        "- They should load as torch.Tensor matrices indexed directly by integer item_id when their first dimension equals item count.\n"
+        "- For each available graph, compute cosine similarity between each candidate vector and the mean vector of the input item ids.\n"
+        "- Report UI and BI LightGCN similarities separately as ui_lightgcn_similarity and bi_lightgcn_similarity.\n"
+        "- If a LightGCN file is absent, cannot be loaded, has an unexpected shape, or torch is unavailable, record null values and a warning instead of failing.\n"
     )
 
     if dataset_key == "pog":
@@ -110,6 +119,7 @@ def generate_code_retrieval_prompt(sample, workspace, evidence_output_file, conf
         "Evidence expectations:\n"
         "- Include every candidate label exactly once: " + ", ".join(labels) + ".\n"
         "- Prefer compact numeric/text values per candidate: metadata fit, BI train co-affiliation/neighborhood support, UI overlap/neighborhood support, and optional embedding similarity.\n"
+        "- If data/ui_item_embeddings.pt or data/bi_item_embeddings.pt exists, use it as optional LightGCN evidence and keep UI/BI similarities as separate values.\n"
         "- For POG datasets, fashion category/title compatibility and train bundle/user neighborhood evidence are useful.\n"
         "- For Spotify datasets, artist/album/track continuity, playlist co-occurrence, user/listener neighborhood evidence, duration compatibility, and optional embedding similarity are useful.\n"
         "- If a source cannot be loaded or a signal is all-zero/tied/unavailable, record that in warnings and put null or zero values honestly.\n"
@@ -127,7 +137,9 @@ def generate_code_retrieval_prompt(sample, workspace, evidence_output_file, conf
         '        "metadata_fit": "short text or numeric value",\n'
         '        "bi_signal": 0,\n'
         '        "ui_signal": 0,\n'
-        '        "embedding_similarity": null\n'
+        '        "embedding_similarity": null,\n'
+        '        "ui_lightgcn_similarity": null,\n'
+        '        "bi_lightgcn_similarity": null\n'
         "      },\n"
         '      "short_evidence": "one concise sentence with useful values and caveats"\n'
         "    }\n"
