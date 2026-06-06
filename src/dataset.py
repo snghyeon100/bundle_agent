@@ -53,12 +53,13 @@ class BundleZeroShotDataset:
         self.b_i_pairs_gt = list2pairs(gt_path)
         np.random.shuffle(self.b_i_pairs_gt)
 
-        if self.toy_eval > 0:
-            self.b_i_pairs_gt = self.b_i_pairs_gt[: self.toy_eval]
-
         shape = (self.num_bundles, self.num_items)
         self.b_i_graph_i = pairs2csr(self.b_i_pairs_i, shape)
+        # Match Bundle_zero: use every test GT item when excluding false candidates.
         self.b_i_graph_gt = pairs2csr(self.b_i_pairs_gt, shape)
+
+        if self.toy_eval > 0:
+            self.b_i_pairs_gt = self.b_i_pairs_gt[: self.toy_eval]
 
     def get_item_text(self, item_id):
         item_id_str = str(int(item_id))

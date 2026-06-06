@@ -1,5 +1,5 @@
 # Dataset
-dataset: pog_dense          # pog | pog_dense | spotify | spotify_sparse
+dataset: pog          # pog | pog_dense | spotify | spotify_sparse
 data_path: ./datasets
 
 # Evaluation
@@ -19,13 +19,13 @@ temperature: 0.0
 openai_send_temperature: false # keep false for GPT-5 models; true only for OpenAI models that support temperature
 openai_reasoning_effort: "" # for GPT-5 models: minimal | low | medium | high
 max_output_tokens: 10
-prediction_api_key_env: ""       # empty = provider default envs (Gemini: GEMINI_API_KEY/GOOGLE_API_KEY, OpenAI: OPENAI_API_KEY)
-reasoning_api_key_env: ""        # empty = prediction key env, then provider default envs
-use_candidate_reasoning: false
+prediction_api_key_env: "GEMINI_API_KEY_1"       # empty = provider default envs (Gemini: GEMINI_API_KEY/GOOGLE_API_KEY, OpenAI: OPENAI_API_KEY)
+reasoning_api_key_env: "GEMINI_API_KEY_2"        # empty = prediction key env, then provider default envs
+use_candidate_reasoning: true
 candidate_reasoning_max_output_tokens: 1200
 
 # Two-stage code retrieval agent
-use_two_stage_agent: true
+use_two_stage_agent: false
 two_stage_code_api_key_env: "GEMINI_API_KEY_3"         # active only when use_two_stage_agent is true
 two_stage_prediction_api_key_env: "GEMINI_API_KEY_4"   # active only when use_two_stage_agent is true
 # Four-stage code-writing agent

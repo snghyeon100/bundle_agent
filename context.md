@@ -2,14 +2,15 @@
 
 ## Purpose
 
-`bundle_agent` is a simplified zero-shot bundle completion runner derived from the larger `LLM-ZeroShot` workspace. The repository keeps the baseline evaluation path as the default, keeps the optional two-step `candidate_reasoning` method, and adds an optional four-stage code-writing agent method for raw-data evidence retrieval.
+`bundle_agent` is a simplified zero-shot bundle completion runner derived from the larger `LLM-ZeroShot` workspace. The repository keeps the baseline evaluation path as the default, keeps the optional two-step `candidate_reasoning` method, and includes optional two-stage and four-stage code-writing agent methods for raw-data evidence retrieval.
 
 Large local artifacts are intentionally not committed. The `datasets/`, `results/`, `.env`, and Python cache directories are ignored by Git.
 
 ## Repository Structure
 
 - `src/dataset.py`: loads BundleConstruction datasets, builds candidate multiple-choice samples, and formats item text.
-- `src/main.py`: runs baseline, candidate-reasoning, or four-stage agent evaluation, saves partial/final CSV files, supports resume, retry, and separate API keys.
+- `src/main.py`: runs baseline, candidate-reasoning, two-stage agent, or four-stage agent evaluation, saves partial/final CSV files, supports resume, retry, and separate API keys.
+- `src/two_stage_agent/`: current two-stage code-retrieval prompt and prediction orchestration.
 - `src/agents/`: modular four-stage agent prompts, allowed-workspace preparation, generated-code execution, verifier-guided replanning, and final prediction orchestration.
 - `config.yaml`: controls dataset, model, evaluation seeds, API key env names, retry policy, and method options.
 - `requirements.txt`: minimal Python dependencies.
@@ -94,6 +95,204 @@ Choice:
 ```
 
 The final raw response is stored in `raw_response`, the parsed answer in `prediction`, and correctness in `hit`.
+
+## Current Two-Stage Code-Retrieval Agent
+
+The current two-stage agent is active when:
+
+```yaml
+use_two_stage_agent: true
+```
+
+The current structure is:
+
+1. Code retrieval: an LLM writes sample-specific Python code over allowed train-safe raw files. The generated code computes candidate-level evidence such as direct BI/UI co-occurrence, metadata/category fit, content similarity, and optional UI/BI LightGCN similarity.
+2. Final prediction: a second LLM receives the candidate text plus compact retrieved evidence and returns the final prediction, reasoning, and confidence.
+
+The first-stage prompt explicitly forbids choosing a winner. Its intended role is evidence measurement, but the current output contract strongly favors compact candidate-level numeric values:
+
+```text
+metadata_fit
+bi_signal
+ui_signal
+embedding_similarity
+ui_lightgcn_similarity
+bi_lightgcn_similarity
+```
+
+This makes the current method closer to a sample-specific feature extractor followed by an LLM predictor than to a broad exploratory research agent. The final predictor can also become anchored on a large co-occurrence or LightGCN value and then use item text as a post-hoc explanation.
+
+### Fixed-Candidate Evaluation
+
+The most reliable two-stage comparison uses these corrected-candidate result files:
+
+```text
+results/pog/results_pog_two_stage_agent_C10_T5_20260605_082843.csv
+results/pog_dense/results_pog_dense_two_stage_agent_C10_T5_20260605_082934.csv
+```
+
+Baselines:
+
+```text
+results/pog/results_pog_20260416_142034.csv
+results/pog_dense/results_pog_dense_HN_C10_T5_20260430_172343.csv
+```
+
+For both datasets, the baseline and two-stage runs have identical input items, candidate items, candidate order, true-option position, and rendered question text for all 250 samples. This removes the candidate-pool mismatch that affected the earlier two-stage comparison.
+
+Summary:
+
+| Dataset | Baseline | Two-stage | Base fail -> success | Base success -> fail | Both fail | Net gain |
+|---|---:|---:|---:|---:|---:|---:|
+| POG | 82/250 (32.8%) | 87/250 (34.8%) | 33 | 28 | 135 | +5 (+2.0 pp) |
+| POG-dense | 84/250 (33.6%) | 136/250 (54.4%) | 74 | 22 | 92 | +52 (+20.8 pp) |
+
+Interpretation:
+
+- POG improves only slightly. It recovers 19.6% of baseline failures but damages 34.1% of baseline-correct samples. The paired improvement is not significant (`p=0.609`).
+- POG-dense improves strongly. It recovers 44.6% of baseline failures while damaging 26.2% of baseline-correct samples. The paired improvement is strongly significant (`p=9.44e-8`).
+- POG produced four `ERR_EX` predictions; two of those samples were baseline-correct and therefore count as damage. POG-dense produced one `ERR_EX`.
+- The POG baseline CSV does not record its model/config, so identical questions are verified, but identical predictor-model conditions cannot be verified.
+
+Detailed artifacts:
+
+```text
+analysis/two_stage_20260605_0828_fixed_candidates/summary.md
+analysis/two_stage_20260605_0828_fixed_candidates/metrics.json
+analysis/two_stage_20260605_0828_fixed_candidates/sample_transitions_pog.csv
+analysis/two_stage_20260605_0828_fixed_candidates/sample_transitions_pog_dense.csv
+```
+
+### Stage Contribution Diagnosis
+
+Stage 1 does not output a prediction. For diagnosis only, the analysis builds an `evidence-only proxy`: every available non-tied numeric signal is min-max normalized, the normalized values are equally averaged per candidate, and a unique top candidate is treated as the proxy choice. This is not an actual Stage 1 prediction and can underweight a highly reliable signal by averaging it with weak signals.
+
+| Dataset | Evidence created | Proxy-valid samples | Evidence-only proxy | Stage 2 on same samples |
+|---|---:|---:|---:|---:|
+| POG | 241/250 | 211/250 | 43/211 (20.4%) | 71/211 (33.6%) |
+| POG-dense | 247/250 | 222/250 | 101/222 (45.5%) | 124/222 (55.9%) |
+
+On proxy-valid samples:
+
+- POG Stage 2 corrects 40 proxy failures but damages 12 proxy successes. It agrees with the proxy choice only 43.6% of the time.
+- POG-dense Stage 2 corrects 28 proxy failures and damages only 5 proxy successes. It agrees with the proxy choice 69.4% of the time.
+- POG reasoning that explicitly mentions retrieved evidence has 30.7% accuracy, versus 41.2% when it does not mention evidence.
+- POG-dense reasoning that explicitly mentions retrieved evidence has 56.0% accuracy, versus 40.0% when it does not mention evidence.
+
+The evidence-mention comparison is descriptive rather than causal, but it matches the broader pattern: current evidence is useful in dense data and often distracting in sparse POG.
+
+### Signal-Level Findings
+
+Direct BI evidence is the main source of dense-data improvement:
+
+- POG has a discriminative `bi_signal` in only 12 samples. All 12 point to the true candidate and all 12 final predictions are correct, but coverage is too low to drive overall performance.
+- POG-dense has a discriminative `bi_signal` in 160 samples. The true candidate is top in 120; final accuracy is 86.7% when the true candidate is top and 0% when it is not.
+- POG-dense final correctness overlaps with true-top direct BI in 104/136 correct samples. Its 74 recoveries include 58 samples with a true-top direct BI signal.
+
+Wrong BI LightGCN evidence is a major damage pattern:
+
+- 19/28 POG damage cases have a wrong BI LightGCN unique top.
+- 16/22 POG-dense damage cases have a wrong BI LightGCN unique top.
+
+Simple content similarity and same-category fit are weak completion signals. They often retrieve or favor items that resemble existing items rather than items that complement the partial bundle.
+
+### Why Dense Gains Do Not Transfer to POG
+
+POG and POG-dense are separate dataset evaluations; dense evidence is not passed into POG. The available raw graph density differs dramatically:
+
+| Property | POG | POG-dense |
+|---|---:|---:|
+| Mean input items | 1.54 | 2.02 |
+| BI train edges per item | 1.04 | 2.37 |
+| UI edges per item | 1.27 | 203.26 |
+| UI item coverage | 25.2% | 77.3% |
+
+In the corrected two-stage runs:
+
+- POG `bi_signal` is all-zero/tied in 229/241 evidence rows, and `ui_signal` is all-zero/tied in 235/241.
+- POG-dense `bi_signal` is all-zero/tied in 87/247 evidence rows, and `ui_signal` is all-zero/tied in 137/247.
+
+Dense Stage 1 can frequently distinguish candidates using direct historical relationships. POG Stage 1 usually cannot, so its final predictor falls back to text reasoning or weak similarity evidence; recoveries and damages nearly cancel out.
+
+## Next Direction: Exploratory Evidence Retrieval
+
+The next two-stage direction should move away from:
+
+```text
+candidate-level numeric feature extraction -> number-anchored prediction
+```
+
+toward:
+
+```text
+broad retrieval of grounded related examples -> evidence-based semantic reasoning
+```
+
+The goal is not to convert existing numbers into natural-language summaries. The goal is to let retrieval search broadly through related items, historical bundles, user interactions, metadata relationships, and other train-safe structures, then give a later LLM enough grounded examples to reason about bundle roles, complementary relationships, patterns, contradictions, and limitations.
+
+### Prompting Philosophy
+
+Do not make methods such as "find similar bundles" or "analyze category patterns" mandatory checklist steps. A fixed checklist can restrict exploration and force irrelevant analyses on every sample. However, a vague instruction such as "find deep evidence" usually collapses back to simple counts and cosine similarities.
+
+The preferred balance is:
+
+- Constrain the research goal, leakage boundary, output size, provenance, and evidence-quality criteria.
+- Let the LLM choose retrieval methods based on the current sample.
+- Offer possible strategies only as non-exhaustive examples, not required steps.
+- Require evidence to be relevant, interpretable, comparative, diverse, balanced, grounded, and honest about sparse or inconclusive data.
+- Explicitly state that a high numeric score is not sufficient evidence.
+- Treat embeddings and LightGCN as retrieval mechanisms for discovering examples, not as proof that a candidate is correct.
+
+Useful high-level research questions:
+
+```text
+What kind of bundle is the partial bundle?
+What roles or relationships might reasonably complete it?
+Which historical observations help evaluate the candidates?
+Which observations support or challenge those relationships?
+How reliable and representative are the retrieved observations?
+```
+
+Possible strategies may include, but are not limited to, related historical bundles, candidate/item neighborhoods, user-interaction neighborhoods, metadata relationships, category structures, embedding-discovered examples, cross-source joins, and contradictory-example retrieval. The agent should choose only strategies that are useful for the current sample and may devise other train-safe strategies.
+
+### Desired Stage 1 Contract
+
+The exploratory retrieval stage should:
+
+- Receive current input/candidate IDs, titles, categories, task semantics, raw-file contracts, allowed workspace files, retrieval/output budgets, and a leakage policy.
+- Not receive true labels, predictions, hits, result files, or instructions to find the best candidate.
+- Search broadly but return a compact, diverse evidence pack.
+- Return human-readable representative items and bundle compositions with provenance and factual retrieval rationale.
+- Include supporting and contradictory observations when available.
+- Distinguish direct historical relationships from similarity-discovered relationships.
+- State limitations when evidence is sparse, tied, indirect, or unavailable.
+- Avoid candidate rankings, preferred candidates, final conclusions, and raw score tables as the primary output.
+
+The evidence pack can include:
+
+```text
+input profile and observed roles/categories
+representative related historical bundles
+candidate/item neighborhood examples
+category or composition observations
+supporting and contradictory examples
+source provenance and retrieval limitations
+```
+
+It should retrieve broadly internally but cap the returned context, for example to a few diverse representative bundles, a few examples per candidate, and a small number of contradictory cases.
+
+### Architectural Constraint and Recommended Form
+
+In the current two-stage implementation, the first LLM writes code before that code is executed. It does not see the retrieved results afterward. Therefore, it cannot itself perform a genuinely semantic natural-language synthesis of the observations it retrieves; executable code can only produce deterministic/template-based descriptions.
+
+There are two implementation options:
+
+1. Minimal two-stage experiment: Stage 1 code retrieves a compact human-readable evidence pack; the final predictor reads the pack, synthesizes it internally, and predicts. This is cheaper but risks conclusion-first reasoning because synthesis and prediction happen in one call.
+2. Preferred three-stage form: exploratory retrieval -> evidence synthesizer -> final predictor. The synthesizer reads actual retrieved examples and produces a grounded natural-language account of bundle roles, recurring patterns, candidate support, counter-evidence, conflicts, and reliability before any final decision is requested.
+
+The central design principle is:
+
+> Constrain what qualifies as good evidence, not which retrieval method the LLM must use.
 
 ## Four-Stage Code-Writing Agent Method
 
@@ -266,6 +465,8 @@ shuffle_seed
 dataset
 data_path
 ```
+
+Candidate negatives are filtered against the full test-GT graph before `toy_eval` truncates the list of evaluated pairs. This matches the original `Bundle_zero` candidate generation and prevents the negative-candidate pool from changing with `toy_eval`. The full test GT is used only inside dataset sample construction to exclude known true items; it is never copied into the agent workspace or exposed to an LLM prompt.
 
 The exact LLM responses can still vary slightly despite `temperature: 0.0` because provider-side generation behavior is not guaranteed to be bit-for-bit deterministic.
 
