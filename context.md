@@ -2,15 +2,16 @@
 
 ## Purpose
 
-`bundle_agent` is a simplified zero-shot bundle completion runner derived from the larger `LLM-ZeroShot` workspace. The repository keeps the baseline evaluation path as the default, keeps the optional two-step `candidate_reasoning` method, and includes optional two-stage and four-stage code-writing agent methods for raw-data evidence retrieval.
+`bundle_agent` is a simplified zero-shot bundle completion runner derived from the larger `LLM-ZeroShot` workspace. The repository keeps the baseline evaluation path as the default, keeps the optional two-step `candidate_reasoning` method, and includes optional two-stage, three-stage, and four-stage code-writing agent methods for raw-data evidence retrieval.
 
 Large local artifacts are intentionally not committed. The `datasets/`, `results/`, `.env`, and Python cache directories are ignored by Git.
 
 ## Repository Structure
 
 - `src/dataset.py`: loads BundleConstruction datasets, builds candidate multiple-choice samples, and formats item text.
-- `src/main.py`: runs baseline, candidate-reasoning, two-stage agent, or four-stage agent evaluation, saves partial/final CSV files, supports resume, retry, and separate API keys.
+- `src/main.py`: runs baseline, candidate-reasoning, two-stage agent, three-stage agent, or four-stage agent evaluation, saves partial/final CSV files, supports resume, retry, and separate API keys.
 - `src/two_stage_agent/`: current two-stage code-retrieval prompt and prediction orchestration.
+- `src/three_stage_agent/`: exploratory retrieval, evidence-only synthesis, and final prediction prompts and orchestration.
 - `src/agents/`: modular four-stage agent prompts, allowed-workspace preparation, generated-code execution, verifier-guided replanning, and final prediction orchestration.
 - `config.yaml`: controls dataset, model, evaluation seeds, API key env names, retry policy, and method options.
 - `requirements.txt`: minimal Python dependencies.
@@ -293,6 +294,42 @@ There are two implementation options:
 The central design principle is:
 
 > Constrain what qualifies as good evidence, not which retrieval method the LLM must use.
+
+## Implemented Three-Stage Exploratory Agent
+
+The preferred three-stage form is now implemented under `src/three_stage_agent/` and integrated into `src/main.py`.
+
+Activate it with:
+
+```yaml
+use_three_stage_agent: true
+use_candidate_reasoning: false
+use_two_stage_agent: false
+use_four_stage_agent: false
+```
+
+When multiple method flags are accidentally enabled, the current runner gives the three-stage agent highest priority. It makes exactly three LLM calls per sample:
+
+1. Exploratory retrieval code generator: receives the sample, task semantics, allowed train-safe files, file contracts, and evidence-quality criteria. It chooses useful retrieval methods, writes executable Python, and is explicitly forbidden from choosing or ranking candidates.
+2. Evidence synthesizer: receives the actual JSON produced by the executed retrieval code. It interprets bundle relationships, candidate support, counter-evidence, conflicts, reliability, and limitations, but is explicitly forbidden from predicting or ranking candidates.
+3. Final predictor: receives the original sample and the evidence synthesis, then chooses one candidate while respecting evidence quality and downweighted evidence.
+
+The first-stage output contract favors compact representative examples with titles, metadata, provenance, factual retrieval rationales, counter-observations, and limitations. Numeric operations and embeddings may be used internally to discover examples, but candidate score tables are not the primary output.
+
+Stage-specific configuration:
+
+```yaml
+three_stage_code_api_key_env: "GEMINI_API_KEY_2"
+three_stage_synthesis_api_key_env: "GEMINI_API_KEY_3"
+three_stage_prediction_api_key_env: "GEMINI_API_KEY_4"
+three_stage_code_max_output_tokens: 3600
+three_stage_synthesis_max_output_tokens: 1800
+three_stage_prediction_max_output_tokens: 900
+```
+
+The result CSV stores the full three-stage trace, including generated retrieval code, execution summary, retrieved evidence JSON, raw and parsed synthesis, raw and parsed prediction, final reasoning/confidence, observations used, and evidence that was downweighted or ignored. Key columns use the `three_stage_` prefix.
+
+The three-stage agent reuses the existing allowed workspace and generated-code guard from `src/agents/workspace.py`. It does not expose true labels, test ground truth, result files, predictions, or hits in any stage prompt.
 
 ## Four-Stage Code-Writing Agent Method
 

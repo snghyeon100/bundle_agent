@@ -21,13 +21,23 @@ openai_reasoning_effort: "" # for GPT-5 models: minimal | low | medium | high
 max_output_tokens: 10
 prediction_api_key_env: "GEMINI_API_KEY_1"       # empty = provider default envs (Gemini: GEMINI_API_KEY/GOOGLE_API_KEY, OpenAI: OPENAI_API_KEY)
 reasoning_api_key_env: "GEMINI_API_KEY_2"        # empty = prediction key env, then provider default envs
-use_candidate_reasoning: true
+use_candidate_reasoning: false
 candidate_reasoning_max_output_tokens: 1200
 
 # Two-stage code retrieval agent
 use_two_stage_agent: false
 two_stage_code_api_key_env: "GEMINI_API_KEY_3"         # active only when use_two_stage_agent is true
 two_stage_prediction_api_key_env: "GEMINI_API_KEY_4"   # active only when use_two_stage_agent is true
+
+# Three-stage exploratory retrieval -> synthesis -> prediction agent
+use_three_stage_agent: true
+three_stage_code_api_key_env: "GEMINI_API_KEY_2"
+three_stage_synthesis_api_key_env: "GEMINI_API_KEY_3"
+three_stage_prediction_api_key_env: "GEMINI_API_KEY_4"
+three_stage_code_max_output_tokens: 3600
+three_stage_synthesis_max_output_tokens: 1800
+three_stage_prediction_max_output_tokens: 900
+
 # Four-stage code-writing agent
 use_four_stage_agent: false
 agent_planning_api_key_env: "OPENAI_API_KEY"       # four-stage only: empty = prediction key env, then provider default envs
