@@ -32,11 +32,18 @@ two_stage_prediction_api_key_env: "GEMINI_API_KEY_4"   # active only when use_tw
 # Three-stage exploratory retrieval -> synthesis -> prediction agent
 use_three_stage_agent: true
 three_stage_code_api_key_env: "GEMINI_API_KEY_2"
+three_stage_deep_code_api_key_env: "GEMINI_API_KEY_2"
 three_stage_synthesis_api_key_env: "GEMINI_API_KEY_3"
 three_stage_prediction_api_key_env: "GEMINI_API_KEY_4"
 three_stage_code_max_output_tokens: 3600
+three_stage_deep_code_max_output_tokens: 3600
 three_stage_synthesis_max_output_tokens: 1800
 three_stage_prediction_max_output_tokens: 900
+three_stage_code_max_repair_attempts: 1
+
+# Stage 1 standalone runner
+stage1_api_key_env: "GEMINI_API_KEY_2"       # empty = three_stage_code_api_key_env, prediction key env, then provider default envs
+stage1_output_dir: ./analysis/stage1
 
 # Four-stage code-writing agent
 use_four_stage_agent: false

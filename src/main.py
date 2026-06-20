@@ -346,14 +346,21 @@ def save_results(results, conf, timestamp, partial=False):
         df["cfg_two_stage_code_api_key_env"] = conf.get("two_stage_code_api_key_env", "")
         df["cfg_two_stage_prediction_api_key_env"] = conf.get("two_stage_prediction_api_key_env", "")
         df["cfg_three_stage_code_api_key_env"] = conf.get("three_stage_code_api_key_env", "")
+        df["cfg_three_stage_deep_code_api_key_env"] = conf.get("three_stage_deep_code_api_key_env", "")
         df["cfg_three_stage_synthesis_api_key_env"] = conf.get("three_stage_synthesis_api_key_env", "")
         df["cfg_three_stage_prediction_api_key_env"] = conf.get("three_stage_prediction_api_key_env", "")
         df["cfg_three_stage_code_max_output_tokens"] = conf.get("three_stage_code_max_output_tokens", "")
+        df["cfg_three_stage_deep_code_max_output_tokens"] = conf.get(
+            "three_stage_deep_code_max_output_tokens", ""
+        )
         df["cfg_three_stage_synthesis_max_output_tokens"] = conf.get(
             "three_stage_synthesis_max_output_tokens", ""
         )
         df["cfg_three_stage_prediction_max_output_tokens"] = conf.get(
             "three_stage_prediction_max_output_tokens", ""
+        )
+        df["cfg_three_stage_code_max_repair_attempts"] = conf.get(
+            "three_stage_code_max_repair_attempts", ""
         )
         df["cfg_agent_planning_api_key_env"] = conf.get("agent_planning_api_key_env", "")
         df["cfg_agent_code_api_key_env"] = conf.get("agent_code_api_key_env", "")
@@ -389,6 +396,7 @@ async def process_samples(
     reasoning_client=None,
     planning_client=None,
     code_client=None,
+    deep_code_client=None,
     verifier_client=None,
     synthesis_client=None,
     agent_prediction_client=None,
@@ -410,6 +418,7 @@ async def process_samples(
                         conf,
                         {
                             "code": code_client or prediction_client,
+                            "deep_code": deep_code_client or code_client or prediction_client,
                             "synthesis": synthesis_client or prediction_client,
                             "prediction": agent_prediction_client or prediction_client,
                         },
@@ -615,6 +624,7 @@ def main():
         reasoning_client = None
         planning_client = None
         code_client = None
+        deep_code_client = None
         verifier_client = None
         synthesis_client = None
         agent_prediction_client = None
@@ -633,10 +643,16 @@ def main():
                 "three_stage_code_api_key_env",
                 [prediction_api_key_env] + provider_fallback_envs,
             )
+            deep_code_api_key, deep_code_api_key_env = resolve_api_key(
+                conf,
+                "three_stage_deep_code_api_key_env",
+                [code_api_key_env, prediction_api_key_env] + provider_fallback_envs,
+            )
             synthesis_api_key, synthesis_api_key_env = resolve_api_key(
                 conf,
                 "three_stage_synthesis_api_key_env",
-                [code_api_key_env, prediction_api_key_env] + provider_fallback_envs,
+                [deep_code_api_key_env, code_api_key_env, prediction_api_key_env]
+                + provider_fallback_envs,
             )
             agent_prediction_api_key, agent_prediction_api_key_env = resolve_api_key(
                 conf,
@@ -645,9 +661,11 @@ def main():
                 + provider_fallback_envs,
             )
             code_client = create_llm_client(conf, code_api_key)
+            deep_code_client = create_llm_client(conf, deep_code_api_key)
             synthesis_client = create_llm_client(conf, synthesis_api_key)
             agent_prediction_client = create_llm_client(conf, agent_prediction_api_key)
             print(f">>> Three-stage code API key env: {code_api_key_env}")
+            print(f">>> Three-stage deep code API key env: {deep_code_api_key_env}")
             print(f">>> Three-stage synthesis API key env: {synthesis_api_key_env}")
             print(f">>> Three-stage prediction API key env: {agent_prediction_api_key_env}")
 
@@ -712,6 +730,7 @@ def main():
                 reasoning_client=reasoning_client,
                 planning_client=planning_client,
                 code_client=code_client,
+                deep_code_client=deep_code_client,
                 verifier_client=verifier_client,
                 synthesis_client=synthesis_client,
                 agent_prediction_client=agent_prediction_client,

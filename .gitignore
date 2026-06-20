@@ -19,7 +19,7 @@ datasets/
 agent_workspaces/
 logs/**
 scripts/**
-
+analysis/**
 # IDE and OS files
 .vscode/
 .idea/
