@@ -308,28 +308,98 @@ use_two_stage_agent: false
 use_four_stage_agent: false
 ```
 
-When multiple method flags are accidentally enabled, the current runner gives the three-stage agent highest priority. It makes exactly three LLM calls per sample:
+When multiple method flags are accidentally enabled, the current runner gives the three-stage agent highest priority. The implementation still uses the conceptual three-stage form, but Stage 1 now contains two code-writing observation agents:
 
-1. Exploratory retrieval code generator: receives the sample, task semantics, allowed train-safe files, file contracts, and evidence-quality criteria. It chooses useful retrieval methods, writes executable Python, and is explicitly forbidden from choosing or ranking candidates.
-2. Evidence synthesizer: receives the actual JSON produced by the executed retrieval code. It interprets bundle relationships, candidate support, counter-evidence, conflicts, reliability, and limitations, but is explicitly forbidden from predicting or ranking candidates.
-3. Final predictor: receives the original sample and the evidence synthesis, then chooses one candidate while respecting evidence quality and downweighted evidence.
+1. Stage 1A, surface observation code generator: receives the sample, task semantics, allowed train-safe files, and file contracts. It writes executable Python to extract broad factual observations from every allowed source and every candidate. It is explicitly forbidden from choosing, ranking, recommending, or implying a preferred candidate.
+2. Stage 1B, deep observation code generator: receives the sample, allowed files, Stage 1A execution summary, and Stage 1A evidence JSON. It writes executable Python to design and execute additional source-grounded investigations that go beyond direct lookup, file diagnostics, tensor shape, and one-hop item counts. It must output factual deep investigations, not predictions.
+3. Stage 2, evidence synthesizer: receives a combined Stage 1 evidence pack containing both the surface and deep observation outputs. It interprets bundle relationships, candidate support, counter-evidence, conflicts, reliability, and limitations, but is explicitly forbidden from predicting or ranking candidates.
+4. Stage 3, final predictor: receives the original sample and the evidence synthesis, then chooses one candidate while respecting evidence quality and downweighted evidence.
 
-The first-stage output contract favors compact representative examples with titles, metadata, provenance, factual retrieval rationales, counter-observations, and limitations. Numeric operations and embeddings may be used internally to discover examples, but candidate score tables are not the primary output.
+Stage 1A is intentionally broad and mostly tabular. It is expected to cover all candidate labels, not only a representative candidate. For POG-style data, the current prompt directly asks for sample-specific extraction from `item_info.json`, `bi_train.txt`, `ui_full.txt`, `content_feature.pt`, and `description_feature.pt`: metadata/group relationships, candidate-only row counts, candidate-with-input row counts, and input-candidate feature similarities. These are observations, not judgments.
+
+Stage 1B is intentionally less prescriptive. It should not be told specific recipes such as category-neighborhood or feature-neighborhood search at first. Instead, it is asked to design and execute deeper source-grounded investigations, state each factual question, explain why the investigation type is relevant without favoring a candidate, and report concrete facts, examples, counts, retrieved IDs, computed values, and limitations.
 
 Stage-specific configuration:
 
 ```yaml
 three_stage_code_api_key_env: "GEMINI_API_KEY_2"
+three_stage_deep_code_api_key_env: "GEMINI_API_KEY_2"
 three_stage_synthesis_api_key_env: "GEMINI_API_KEY_3"
 three_stage_prediction_api_key_env: "GEMINI_API_KEY_4"
 three_stage_code_max_output_tokens: 3600
+three_stage_deep_code_max_output_tokens: 3600
 three_stage_synthesis_max_output_tokens: 1800
 three_stage_prediction_max_output_tokens: 900
+three_stage_code_max_repair_attempts: 1
 ```
 
-The result CSV stores the full three-stage trace, including generated retrieval code, execution summary, retrieved evidence JSON, raw and parsed synthesis, raw and parsed prediction, final reasoning/confidence, observations used, and evidence that was downweighted or ignored. Key columns use the `three_stage_` prefix.
+The result CSV stores the full three-stage trace, including surface generated code, surface execution summary, surface evidence JSON, deep generated code, deep execution summary, deep evidence JSON, combined evidence JSON, raw and parsed synthesis, raw and parsed prediction, final reasoning/confidence, observations used, and evidence that was downweighted or ignored. Key columns use the `three_stage_` prefix.
 
 The three-stage agent reuses the existing allowed workspace and generated-code guard from `src/agents/workspace.py`. It does not expose true labels, test ground truth, result files, predictions, or hits in any stage prompt.
+
+Stage 1 can also be run standalone for debugging:
+
+```powershell
+.\.venv\Scripts\python.exe src\run_three_stage_stage1.py --config config.yaml --sample_idx 0 --limit 1
+```
+
+The standalone runner writes per-sample JSON and a summary JSONL under `analysis/stage1` by default. Use `--skip_deep` to run only Stage 1A surface observation.
+
+## 2026-06-20 Three-Stage Agent Notes
+
+The main design discussion on 2026-06-20 centered on how to use an LLM when only raw source files are provided. The target behavior is:
+
+```text
+source files -> LLM-written retrieval/observation code -> factual observations -> synthesis -> final judgment
+```
+
+The key decision was to make Stage 1 an evidence-observation stage rather than a reasoning or prediction stage. Stage 1 should not summarize, rank, or decide. It should extract factual observations from the raw sources and leave interpretation to Stage 2.
+
+Stage 1A went through several prompt iterations:
+
+- Early versions asked for too many interpretive outputs, such as support/counter/reliability/missing role, which belonged in Stage 2.
+- The schema was reduced to `source_observations`, `source_attempts`, and `warnings`.
+- The prompt was changed to require all allowed sources, not just one source.
+- The prompt was changed to require candidate coverage for every candidate label A-J, not only candidate A.
+- A weaker prompt asking the LLM to infer meaningful source use helped somewhat but was unstable: it sometimes extracted candidate observations from `item_info.json` and `bi_train.txt`, but often stopped at file existence, row count, or tensor shape for harder sources.
+- The final surface prompt became more direct. It tells the LLM exactly what data to extract from each source while still forbidding prediction.
+
+Observed Stage 1A behavior during `--sample_idx 0 --limit 1` experiments:
+
+- `stage1_summary_pog_20260620_170558.jsonl`: valid JSON, but only shallow observations; mostly `item_info.json`, one `bi_train.txt` check, and tensor shape.
+- `stage1_summary_pog_20260620_171015.jsonl`: candidate A-J coverage improved for `item_info.json`, but other sources remained shallow.
+- `stage1_summary_pog_20260620_171712.jsonl`: `bi_train.txt` began producing candidate-level row observations, but `ui_full.txt` and feature tensors still often stopped at shallow checks.
+- `stage1_summary_pog_20260620_172518.jsonl`: direct source-specific extraction produced useful observations for all candidates across `item_info.json`, `bi_train.txt`, `ui_full.txt`, `content_feature.pt`, and `description_feature.pt`.
+- `stage1_summary_pog_20260620_172750.jsonl`: `bi_train.txt` and `ui_full.txt` separated candidate-only row counts from candidate-with-input row counts, which is important because candidate-only frequency should not be mislabeled as co-occurrence.
+
+Important Stage 1A lesson: prompt-only autonomy was not enough for stable source extraction. If the goal is reliable broad coverage, direct source-specific extraction instructions work better. If the goal is observing how the LLM chooses deeper investigations, that should be separated into a different agent rather than mixed into the broad surface extraction prompt.
+
+The resulting Stage 1 split is:
+
+```text
+Stage 1A Surface Observation:
+  Broad, explicit, source-by-source extraction.
+  Covers all sources and all candidates.
+  Produces factual observations only.
+
+Stage 1B Deep Observation:
+  Receives Stage 1A evidence.
+  Designs additional source-grounded investigations.
+  Avoids explicit hard-coded recipes at first.
+  Goes beyond direct lookup, diagnostics, tensor shape, and one-hop counts.
+  Produces deep_investigations with question, why_relevant, sources_used, method_summary, observations, limitations.
+```
+
+The intended Stage 1B prompt style is deliberately non-recipe-based:
+
+```text
+Design and execute additional source-grounded investigations that may reveal non-obvious factual context for the current completion task.
+Go beyond direct lookup, file diagnostics, tensor shape, and one-hop item counts.
+Use the source structure to discover additional context, comparisons, neighborhoods, repeated patterns, or indirect relationships that are not already present in the surface observations.
+Do not choose, rank, recommend, or imply a preferred candidate.
+```
+
+This keeps the experiment focused on what the LLM decides to investigate deeply, while Stage 1A guarantees a stable baseline evidence table.
 
 ## Four-Stage Code-Writing Agent Method
 
