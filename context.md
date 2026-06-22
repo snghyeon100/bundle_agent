@@ -308,32 +308,39 @@ use_two_stage_agent: false
 use_four_stage_agent: false
 ```
 
-When multiple method flags are accidentally enabled, the current runner gives the three-stage agent highest priority. The implementation still uses the conceptual three-stage form, but Stage 1 now contains two code-writing observation agents:
+When multiple method flags are accidentally enabled, the current runner gives the three-stage agent highest priority. The implementation still uses the conceptual three-stage form, but Stage 1 now separates broad observation, adaptive deep research planning, and deep code execution:
 
 1. Stage 1A, surface observation code generator: receives the sample, task semantics, allowed train-safe files, and file contracts. It writes executable Python to extract broad factual observations from every allowed source and every candidate. It is explicitly forbidden from choosing, ranking, recommending, or implying a preferred candidate.
-2. Stage 1B, deep observation code generator: receives the sample, allowed files, Stage 1A execution summary, and Stage 1A evidence JSON. It writes executable Python to design and execute additional source-grounded investigations that go beyond direct lookup, file diagnostics, tensor shape, and one-hop item counts. It must output factual deep investigations, not predictions.
-3. Stage 2, evidence synthesizer: receives a combined Stage 1 evidence pack containing both the surface and deep observation outputs. It interprets bundle relationships, candidate support, counter-evidence, conflicts, reliability, and limitations, but is explicitly forbidden from predicting or ranking candidates.
-4. Stage 3, final predictor: receives the original sample and the evidence synthesis, then chooses one candidate while respecting evidence quality and downweighted evidence.
+2. Stage 1B-Plan, adaptive research architect: receives the sample, allowed files, Stage 1A execution summary, and Stage 1A evidence JSON. Without receiving a menu of retrieval algorithms, it diagnoses unresolved surface gaps, internally compares multiple possible investigations by novelty, expected information gain, candidate discrimination, grounding, robustness, independence, and feasibility, then returns a compact research specification. It does not write code or predict.
+3. Stage 1B-Code, deep observation code generator: receives the fixed research specification and writes executable Python that implements it. It may not replace a planned investigation with an easier direct lookup or one-hop count. Code repair must preserve the research specification and change only implementation defects.
+4. Stage 2, evidence synthesizer: receives a combined Stage 1 evidence pack containing the deep research specification plus the surface and executed deep observation outputs. It treats the plan as intent rather than evidence, checks plan fulfillment, and interprets bundle relationships, candidate support, counter-evidence, conflicts, reliability, and limitations without predicting or ranking candidates.
+5. Stage 3, final predictor: receives the original sample and the evidence synthesis, then chooses one candidate while respecting evidence quality and downweighted evidence.
 
 Stage 1A is intentionally broad and mostly tabular. It is expected to cover all candidate labels, not only a representative candidate. For POG-style data, the current prompt directly asks for sample-specific extraction from `item_info.json`, `bi_train.txt`, `ui_full.txt`, `content_feature.pt`, and `description_feature.pt`: metadata/group relationships, candidate-only row counts, candidate-with-input row counts, and input-candidate feature similarities. These are observations, not judgments.
 
-Stage 1B is intentionally less prescriptive. It should not be told specific recipes such as category-neighborhood or feature-neighborhood search at first. Instead, it is asked to design and execute deeper source-grounded investigations, state each factual question, explain why the investigation type is relevant without favoring a candidate, and report concrete facts, examples, counts, retrieved IDs, computed values, and limitations.
+The file-format contract explicitly treats the first value of every BI/UI row as a typed context ID, never an item ID: `context_id = values[0]`, `item_ids = values[1:]`. Bundle/user IDs and item IDs remain different entities even when their integer values match. Generated code is instructed to perform every item lookup, count, co-occurrence, category mapping, join, neighborhood operation, and graph traversal only over `item_ids`.
+
+Stage 1B planning is intentionally method-agnostic. It is not given a checklist or menu of retrieval recipes. Instead, it must determine what Stage 1A cannot establish, generate and compare possible research designs internally, and select a small non-redundant portfolio using evidence-quality criteria. The separate code agent then implements that specification and reports concrete facts, examples, counts, retrieved IDs, computed values, provenance, plan fulfillment, and limitations.
 
 Stage-specific configuration:
 
 ```yaml
 three_stage_code_api_key_env: "GEMINI_API_KEY_2"
 three_stage_deep_code_api_key_env: "GEMINI_API_KEY_2"
+three_stage_deep_planning_model: ""  # empty = global model; may be set to a stronger compatible model
+three_stage_deep_code_model: ""      # empty = global model
 three_stage_synthesis_api_key_env: "GEMINI_API_KEY_3"
 three_stage_prediction_api_key_env: "GEMINI_API_KEY_4"
 three_stage_code_max_output_tokens: 3600
+three_stage_deep_planning_max_output_tokens: 1800
 three_stage_deep_code_max_output_tokens: 3600
-three_stage_synthesis_max_output_tokens: 1800
+three_stage_synthesis_max_output_tokens: 3600
+three_stage_synthesis_max_repair_attempts: 1
 three_stage_prediction_max_output_tokens: 900
 three_stage_code_max_repair_attempts: 1
 ```
 
-The result CSV stores the full three-stage trace, including surface generated code, surface execution summary, surface evidence JSON, deep generated code, deep execution summary, deep evidence JSON, combined evidence JSON, raw and parsed synthesis, raw and parsed prediction, final reasoning/confidence, observations used, and evidence that was downweighted or ignored. Key columns use the `three_stage_` prefix.
+The result CSV stores the full three-stage trace, including surface generated code, surface execution summary, surface evidence JSON, deep planning prompt/raw/parsed JSON, deep generated code, deep execution summary, deep evidence JSON, combined evidence JSON, synthesis repair traces and validation issues, raw and parsed synthesis, raw and parsed prediction, final reasoning/confidence, observations used, and evidence that was downweighted or ignored. Key columns use the `three_stage_` prefix. Deep evidence validation also requires every completed or partial investigation to emit separate observations for every exact candidate scope (`candidate:A`, `candidate:B`, and so on); item-id scopes and one aggregate candidate-value blob are rejected and sent to code repair. Missing optional `examples` fields are normalized to empty lists and do not invalidate otherwise usable evidence. If validation issues remain after the repair budget is exhausted, the raw deep output is retained for debugging but excluded from the evidence passed to synthesis.
 
 The three-stage agent reuses the existing allowed workspace and generated-code guard from `src/agents/workspace.py`. It does not expose true labels, test ground truth, result files, predictions, or hits in any stage prompt.
 
@@ -343,7 +350,7 @@ Stage 1 can also be run standalone for debugging:
 .\.venv\Scripts\python.exe src\run_three_stage_stage1.py --config config.yaml --sample_idx 0 --limit 1
 ```
 
-The standalone runner writes per-sample JSON and a summary JSONL under `analysis/stage1` by default. Use `--skip_deep` to run only Stage 1A surface observation.
+The standalone runner normally makes three LLM calls per sample: Stage 1A surface code, Stage 1B research planning, and Stage 1B deep code. It writes per-sample JSON and a summary JSONL under `analysis/stage1` by default. Use `--skip_deep` to run only Stage 1A surface observation.
 
 ## 2026-06-20 Three-Stage Agent Notes
 

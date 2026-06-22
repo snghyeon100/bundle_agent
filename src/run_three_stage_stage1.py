@@ -6,7 +6,7 @@ import time
 
 import yaml
 
-from agents.common import build_agent_sample_view, compact_json
+from agents.common import build_agent_sample_view, compact_json, parse_json_from_text
 from agents.workspace import prepare_agent_workspace
 from dataset import BundleZeroShotDataset, set_seed
 from main import (
@@ -23,6 +23,7 @@ from three_stage_agent.pipeline import (
     summarize_execution,
 )
 from three_stage_agent.prompts import (
+    generate_deep_observation_planning_prompt,
     generate_deep_observation_prompt,
     generate_exploratory_retrieval_prompt,
 )
@@ -96,14 +97,53 @@ async def run_stage1_for_sample(
     execution_result = retrieval_result["execution_result"]
     execution_summary = summarize_execution(execution_result)
     deep_result = None
+    deep_planning_prompt = ""
+    deep_planning_raw_text = ""
+    deep_planning_json = None
+    deep_planning_for_code = None
     deep_execution_result = None
     deep_execution_summary = None
     if not skip_deep:
+        deep_planning_prompt = generate_deep_observation_planning_prompt(
+            sample,
+            workspace,
+            execution_result.get("evidence_json"),
+            execution_summary,
+            conf,
+        )
+        if show_prompt:
+            print("\n" + "=" * 80)
+            print(
+                f"Stage 1B planning prompt for sample_idx={sample_idx}, "
+                f"bundle_id={sample['bundle_id']}"
+            )
+            print("=" * 80)
+            print(deep_planning_prompt)
+        deep_planning_raw_text = await call_stage(
+            generate_content_with_retry,
+            client,
+            conf,
+            deep_planning_prompt,
+            "three_stage_deep_planning_max_output_tokens",
+            1800,
+            f"sample {sample_idx} stage1 deep observation planning",
+            model_key="three_stage_deep_planning_model",
+        )
+        deep_planning_json = parse_json_from_text(deep_planning_raw_text)
+        if isinstance(deep_planning_json, dict):
+            deep_planning_for_code = deep_planning_json
+        else:
+            deep_planning_for_code = {
+                "planning_parse_error": "The planning response was not valid JSON.",
+                "raw_planning_text": str(deep_planning_raw_text or "")[:8000],
+            }
+
         deep_prompt = generate_deep_observation_prompt(
             sample,
             workspace,
             execution_result.get("evidence_json"),
             execution_summary,
+            deep_planning_for_code,
             deep_evidence_output_file,
             conf,
         )
@@ -120,6 +160,7 @@ async def run_stage1_for_sample(
             "three_stage_deep_code_max_output_tokens",
             3600,
             f"sample {sample_idx} stage1 deep observation",
+            model_key="three_stage_deep_code_model",
         )
         deep_result = await run_deep_observation_with_repairs(
             sample,
@@ -131,6 +172,7 @@ async def run_stage1_for_sample(
             workspace,
             execution_result.get("evidence_json"),
             execution_summary,
+            deep_planning_for_code,
             deep_evidence_output_file,
         )
         deep_execution_result = deep_result["execution_result"]
@@ -152,11 +194,17 @@ async def run_stage1_for_sample(
         "evidence_json": execution_result.get("evidence_json"),
         "evidence_text": execution_result.get("evidence_text", ""),
         "deep_evidence_output_file": deep_evidence_output_file if not skip_deep else "",
+        "deep_planning_prompt": deep_planning_prompt,
+        "deep_planning_raw_response": deep_planning_raw_text,
+        "deep_planning_json": deep_planning_json,
         "deep_raw_response": deep_result["deep_raw_response"] if deep_result else "",
         "deep_repair_raw_responses": deep_result["deep_repair_raw_responses"] if deep_result else [],
         "deep_repair_attempts_used": deep_result["deep_repair_attempts_used"] if deep_result else 0,
         "deep_generated_code": deep_result["deep_generated_code"] if deep_result else "",
         "deep_execution_summary": deep_execution_summary,
+        "deep_evidence_validation_issues": (
+            deep_result["deep_evidence_validation_issues"] if deep_result else []
+        ),
         "deep_evidence_json": deep_execution_result.get("evidence_json") if deep_execution_result else None,
         "deep_evidence_text": deep_execution_result.get("evidence_text", "") if deep_execution_result else "",
     }
@@ -177,7 +225,9 @@ async def run_stage1_for_sample(
         f"returncode={record['execution_summary']['returncode']} "
         f"evidence_json={record['execution_summary']['evidence_json_present']} "
         f"repairs={record['retrieval_repair_attempts_used']} "
+        f"deep_plan_json={bool(record['deep_planning_json'])} "
         f"deep_json={bool(record['deep_evidence_json'])} "
+        f"deep_validation_issues={len(record['deep_evidence_validation_issues'])} "
         f"deep_repairs={record['deep_repair_attempts_used']} "
         f"saved={output_path}"
     )
@@ -242,7 +292,11 @@ async def async_main(args):
                 "repair_attempts_used": record["retrieval_repair_attempts_used"],
                 "evidence_json": record["evidence_json"],
                 "deep_execution_summary": record["deep_execution_summary"],
+                "deep_planning_json": record["deep_planning_json"],
                 "deep_repair_attempts_used": record["deep_repair_attempts_used"],
+                "deep_evidence_validation_issues": record[
+                    "deep_evidence_validation_issues"
+                ],
                 "deep_evidence_json": record["deep_evidence_json"],
             }
             handle.write(compact_json(compact_record) + "\n")

@@ -36,6 +36,18 @@ def dataset_contract(sample, workspace):
         "bundle_id, item_id, item_id, ...\n"
         "data/ui_full.txt contains comma-space separated user/context rows: "
         "user_id, item_id, item_id, ...\n"
+        "CRITICAL POSITIONAL ID CONTRACT:\n"
+        "- In every bi_train.txt row, values[0] is a bundle_id and values[1:] are the only item_ids.\n"
+        "- In every ui_full.txt row, values[0] is a user_id and values[1:] are the only item_ids.\n"
+        "- bundle_id, user_id, and item_id are different entity types even when their integer values happen to "
+        "be identical. A bundle_id or user_id must never be counted, compared, joined, looked up in item_info, "
+        "or mapped to an item category as though it were an item_id.\n"
+        "- Parse each relational row explicitly as: values = line.strip().split(', '); "
+        "context_id = values[0]; item_ids = values[1:].\n"
+        "- Perform every item membership test, item frequency count, co-occurrence calculation, category lookup, "
+        "neighborhood construction, and graph traversal only over item_ids, never over the full values/row list.\n"
+        "- Code that searches the full parsed row for an item ID is incorrect because it can silently confuse a "
+        "context ID with an item ID.\n"
         "Optional .pt files listed in the allowed files are torch.Tensor item-feature matrices "
         "indexed by integer item_id when their first dimension matches the item count.\n"
     )
@@ -231,40 +243,56 @@ def generate_exploratory_retrieval_repair_prompt(
     )
 
 
-def generate_deep_observation_prompt(
+def generate_deep_observation_planning_prompt(
     sample,
     workspace,
     surface_evidence_json,
     surface_execution_summary,
-    evidence_output_file,
     conf,
 ):
     sample_view = build_agent_sample_view(sample)
-    max_stdout_chars = int(conf.get("agent_code_max_stdout_chars", 20000))
+    labels = candidate_labels(sample)
     return (
-        "You are the deep source-observation agent for a bundle completion system.\n"
+        "You are the adaptive research architect for the deep source-observation stage of a bundle "
+        "completion system.\n"
         "The surface observation agent has already extracted direct facts such as metadata, direct row counts, "
-        "and direct numeric comparisons. Your job is to write executable Python code that designs and executes "
-        "additional source-grounded investigations for the current sample.\n\n"
-        "Your role is deeper observation, not interpretation or prediction:\n"
+        "and direct numeric comparisons. Design a compact research specification for genuinely new, "
+        "source-grounded investigations. A later code agent will implement the specification.\n\n"
+        "Your role is research design, not code writing, interpretation, or prediction:\n"
+        "- Do not write Python code.\n"
         "- Do not choose, rank, recommend, or imply a preferred candidate.\n"
         "- Do not output a winner, answer, prediction, best label, or true label.\n"
-        "- Do not repeat surface observations unless they are used as starting points for deeper extraction.\n"
-        "- Do not make unsupported semantic claims. Keep observations factual and source-grounded.\n\n"
-        "Deep investigation requirements:\n"
-        "- Design and execute additional investigations that may reveal non-obvious factual context for the "
-        "current completion task.\n"
-        "- For each investigation, formulate a factual question, briefly state why the question is relevant to "
-        "the completion task without favoring a candidate, and extract concrete facts from allowed sources.\n"
-        "- Tie observations to current input items, candidate items, or relationships visible in the sources.\n"
-        "- Go beyond direct lookup, file diagnostics, tensor shape, and one-hop item counts.\n"
-        "- Use the source structure to discover additional context, comparisons, neighborhoods, repeated "
-        "patterns, or indirect relationships that are not already present in the surface observations.\n"
-        "- Record compact examples, counts, retrieved ids, or computed values when available.\n"
-        "- If an investigation fails or produces no useful facts, record what was tried and what was observed.\n"
-        "- Include every candidate label in at least one deep investigation when possible. If a candidate cannot "
-        "be covered by deep observations, record that limitation.\n"
-        "- Do not output your private planning. Output only the executed investigations and factual results.\n\n"
+        "- Do not restate Stage 1A observations as proposed investigations.\n"
+        "- Do not expose private chain-of-thought. Return only the concise research specification requested below.\n\n"
+        "Adaptive research process:\n"
+        "- Diagnose the important uncertainty that remains after reading the surface evidence.\n"
+        "- Internally generate multiple possible investigation designs rather than accepting the first familiar "
+        "or easy idea.\n"
+        "- Compare possible designs by novelty beyond Stage 1A, expected information gain, ability to expose "
+        "candidate-level differences, source grounding, auditability, robustness to sparse or tied observations, "
+        "independence from the other selected investigations, and feasibility within the execution budget.\n"
+        "- Select the smallest non-redundant portfolio that meaningfully addresses the unresolved uncertainty. "
+        "Do not force an irrelevant investigation merely to increase the count.\n"
+        "- Each selected investigation must answer a factual question that Stage 1A cannot already answer.\n"
+        "- If exact observations are sparse, tied, or absent, redesign the representation, abstraction level, "
+        "relationship path, or estimation basis instead of repeating the same empty query.\n"
+        "- Make the computation contract precise enough for a separate code agent to implement without inventing "
+        "a replacement method.\n"
+        "- Cover all candidate labels across the portfolio when the sources permit it. Record a concrete limitation "
+        "when complete coverage is not feasible.\n"
+        "- Every planned candidate-level signal must be returned as separate observations keyed by the exact "
+        "candidate label. Do not plan an unlabeled score dictionary or use item IDs as candidate keys. Required "
+        f"candidate scopes are: {', '.join(f'candidate:{label}' for label in labels)}.\n"
+        "- Reject cosmetic variations of direct lookup, file diagnostics, tensor shape checks, direct similarity "
+        "tables, and one-hop item counts. Such surface operations may only be starting points inside a genuinely "
+        "deeper investigation.\n\n"
+        "Private quality audit before returning the specification:\n"
+        "- Verify that every selected investigation adds information unavailable in Stage 1A.\n"
+        "- Verify that its possible observations could meaningfully distinguish relationships among candidates.\n"
+        "- Verify that it is grounded in files that are actually available.\n"
+        "- Verify that it can return interpretable facts, provenance, and representative observations.\n"
+        "- Verify that it is distinct from the other selected investigations and does not make the final decision.\n"
+        "- Redesign any investigation that fails this audit.\n\n"
         "Dataset/task semantics:\n"
         f"{task_semantics(sample.get('dataset', ''))}\n\n"
         "Current sample JSON:\n"
@@ -277,6 +305,88 @@ def generate_deep_observation_prompt(
         f"{json.dumps(surface_execution_summary, ensure_ascii=False, indent=2)}\n\n"
         "Surface observation JSON:\n"
         f"{json.dumps(surface_evidence_json, ensure_ascii=False, indent=2)}\n\n"
+        "Execution constraints the later code must respect:\n"
+        f"- Generated code timeout: about {int(conf.get('agent_code_timeout_seconds', 30))} seconds.\n"
+        f"- Printed evidence budget: about {int(conf.get('agent_code_max_stdout_chars', 20000))} characters.\n"
+        "- Only the listed relative files may be read. No network, parent-directory, result-file, ground-truth, "
+        "prediction, or true-label access is allowed.\n\n"
+        "Return only valid JSON using this schema:\n"
+        "{\n"
+        '  "surface_gaps": ["important unresolved factual uncertainty"],\n'
+        '  "investigation_portfolio": [\n'
+        "    {\n"
+        '      "investigation_id": "short stable id",\n'
+        '      "factual_question": "question the executed investigation will answer",\n'
+        '      "surface_gap_addressed": "specific Stage 1A limitation addressed",\n'
+        '      "why_new": "why this is not a repeat or cosmetic variation of Stage 1A",\n'
+        '      "expected_information_gain": "uncertainty the possible observations can reduce",\n'
+        '      "required_sources": ["file name from allowed list"],\n'
+        '      "computation_contract": "precise source-grounded relationships and operations to implement",\n'
+        '      "candidate_coverage": "how candidate labels are covered without ranking them",\n'
+        '      "robustness_adaptation": "how the investigation changes when direct evidence is sparse or tied",\n'
+        '      "evidence_to_return": ["compact factual output with provenance"],\n'
+        '      "known_limitations": ["what the investigation cannot establish"]\n'
+        "    }\n"
+        "  ],\n"
+        '  "portfolio_rationale": "why this portfolio is informative, feasible, and non-redundant",\n'
+        '  "rejected_shallow_repetitions": ["surface operation deliberately not repeated"],\n'
+        '  "coverage_limitations": ["concrete limitation, if any"]\n'
+        "}\n"
+    )
+
+
+def generate_deep_observation_prompt(
+    sample,
+    workspace,
+    surface_evidence_json,
+    surface_execution_summary,
+    deep_planning_json,
+    evidence_output_file,
+    conf,
+):
+    sample_view = build_agent_sample_view(sample)
+    labels = candidate_labels(sample)
+    max_stdout_chars = int(conf.get("agent_code_max_stdout_chars", 20000))
+    return (
+        "You are the implementation agent for the deep source-observation stage of a bundle completion system.\n"
+        "An adaptive research architect has already selected the investigations. Write executable Python code "
+        "that faithfully implements that research specification over the allowed local files.\n\n"
+        "Implementation contract:\n"
+        "- Implement every feasible investigation in the supplied research specification.\n"
+        "- Preserve each investigation's factual question, source relationships, depth, candidate coverage, and "
+        "robustness adaptation.\n"
+        "- Do not redesign the research portfolio or replace an investigation with an easier direct lookup, direct "
+        "similarity table, or one-hop count.\n"
+        "- If an investigation is infeasible after inspecting its required sources, record the concrete failure and "
+        "limitation instead of silently substituting a shallower method.\n"
+        "- Surface observations may be used only as starting points for the planned deeper computation.\n"
+        "- Do not choose, rank, recommend, or imply a preferred candidate. Do not output a winner, prediction, "
+        "best label, or true label.\n"
+        "- Keep every observation factual, source-grounded, auditable, and tied to the current sample.\n"
+        "- Return compact examples, counts, ids, computed values, and provenance requested by the plan.\n\n"
+        "Candidate signal contract:\n"
+        "- In every completed or partial investigation, return candidate-specific signals as separate observation "
+        "objects for every candidate label.\n"
+        f"- The required exact scope values are: {', '.join(f'candidate:{label}' for label in labels)}.\n"
+        "- Never use item IDs in scope values, such as candidate:1540.\n"
+        "- Never place candidate values only inside one cross_candidate or context observation, dictionary, or text "
+        "blob. Shared context observations may be added, but they do not replace the candidate-labeled observations.\n"
+        "- Each candidate observation must contain only that candidate's signal, related item IDs, factual basis, "
+        "and examples.\n\n"
+        "Dataset/task semantics:\n"
+        f"{task_semantics(sample.get('dataset', ''))}\n\n"
+        "Current sample JSON:\n"
+        f"{json.dumps(sample_view, ensure_ascii=False, indent=2)}\n\n"
+        "Allowed workspace files:\n"
+        f"{json.dumps(workspace['files'], ensure_ascii=False, indent=2)}\n\n"
+        "File format contract:\n"
+        f"{dataset_contract(sample, workspace)}\n"
+        "Surface retrieval execution summary:\n"
+        f"{json.dumps(surface_execution_summary, ensure_ascii=False, indent=2)}\n\n"
+        "Surface observation JSON:\n"
+        f"{json.dumps(surface_evidence_json, ensure_ascii=False, indent=2)}\n\n"
+        "Deep research specification JSON:\n"
+        f"{json.dumps(deep_planning_json, ensure_ascii=False, indent=2)}\n\n"
         "Filesystem and leakage restrictions:\n"
         "- Run from the workspace directory and read only listed files through relative paths under data/.\n"
         "- Write the final JSON only under output/.\n"
@@ -293,14 +403,16 @@ def generate_deep_observation_prompt(
         "{\n"
         '  "deep_investigations": [\n'
         "    {\n"
+        '      "investigation_id": "id from the research specification",\n'
         '      "question": "factual question investigated",\n'
         '      "why_relevant": "task relevance of this investigation type, without favoring a candidate",\n'
+        '      "novelty_from_surface": "what this adds beyond Stage 1A",\n'
         '      "sources_used": ["file name from allowed list"],\n'
         '      "method_summary": "short factual description of what was computed or retrieved",\n'
         '      "observations": [\n'
         "        {\n"
         '          "source": "file name used",\n'
-        '          "scope": "input|candidate:A|cross_candidate|context",\n'
+        '          "scope": "candidate:A",\n'
         '          "observation": "factual observation",\n'
         '          "related_ids": [0],\n'
         '          "basis": "lookup/count/computation/retrieval basis",\n'
@@ -308,6 +420,13 @@ def generate_deep_observation_prompt(
         "        }\n"
         "      ],\n"
         '      "limitations": ["what this investigation could not establish"]\n'
+        "    }\n"
+        "  ],\n"
+        '  "plan_fulfillment": [\n'
+        "    {\n"
+        '      "investigation_id": "id from the research specification",\n'
+        '      "status": "completed|partial|failed",\n'
+        '      "details": "short factual implementation status"\n'
         "    }\n"
         "  ],\n"
         '  "warnings": ["short warning about sparse, failed, or inconclusive deep investigation"]\n'
@@ -323,22 +442,27 @@ def generate_deep_observation_repair_prompt(
     workspace,
     surface_evidence_json,
     surface_execution_summary,
+    deep_planning_json,
     evidence_output_file,
     previous_code,
     execution_summary,
     conf,
 ):
     sample_view = build_agent_sample_view(sample)
+    labels = candidate_labels(sample)
     max_stdout_chars = int(conf.get("agent_code_max_stdout_chars", 20000))
     return (
         "You are repairing Python code for the deep source-observation stage of a bundle completion system.\n"
-        "The previous code failed, was blocked, timed out, or did not produce parseable JSON. Produce a simpler "
-        "corrected script that follows the same deep investigation schema.\n\n"
+        "The previous code failed, was blocked, timed out, or did not produce parseable JSON. Correct the "
+        "implementation defects while preserving the supplied research specification and investigation depth.\n\n"
         "Do not predict, rank, recommend, imply a preferred candidate, or output true labels. Do not merely "
-        "repeat surface observations. Design and execute additional source-grounded investigations that go "
-        "beyond direct lookup, file diagnostics, tensor shape, and one-hop item counts. Each investigation must "
-        "include a factual question, a brief non-candidate-favoring relevance note, source-grounded observations, "
-        "and limitations. Include every candidate label in at least one deep investigation when possible.\n\n"
+        "repeat surface observations. Do not redesign, omit, or replace a planned investigation with a shallower "
+        "direct lookup, direct similarity table, or one-hop count. Repair only what prevents faithful execution. "
+        "If a planned investigation is genuinely infeasible, preserve it in the output with failed status and a "
+        "concrete limitation.\n\n"
+        "For every completed or partial investigation, output separate candidate observations using every exact "
+        f"scope: {', '.join(f'candidate:{label}' for label in labels)}. Do not use item IDs as scope values and do "
+        "not replace candidate observations with one cross_candidate dictionary or text blob.\n\n"
         "Current sample JSON:\n"
         f"{json.dumps(sample_view, ensure_ascii=False, indent=2)}\n\n"
         "Allowed workspace files:\n"
@@ -349,6 +473,8 @@ def generate_deep_observation_repair_prompt(
         f"{json.dumps(surface_execution_summary, ensure_ascii=False, indent=2)}\n\n"
         "Surface observation JSON:\n"
         f"{json.dumps(surface_evidence_json, ensure_ascii=False, indent=2)}\n\n"
+        "Deep research specification JSON:\n"
+        f"{json.dumps(deep_planning_json, ensure_ascii=False, indent=2)}\n\n"
         "Previous execution summary:\n"
         f"{json.dumps(execution_summary, ensure_ascii=False, indent=2)}\n\n"
         "Previous code:\n"
@@ -357,7 +483,7 @@ def generate_deep_observation_repair_prompt(
         "- Read only listed relative files under data/.\n"
         "- Write valid JSON only under output/ and print the same object to stdout.\n"
         "- Do not access parent directories, absolute paths, network resources, result files, or ground truth.\n"
-        "- Use the schema from the original deep-stage prompt: deep_investigations and warnings.\n"
+        "- Use the schema from the original deep-stage prompt: deep_investigations, plan_fulfillment, and warnings.\n"
         f"- Keep printed JSON under about {max_stdout_chars} characters.\n"
         f"- Write the JSON to {evidence_output_file}.\n\n"
         "Generate executable Python code only. Do not wrap it in markdown. Do not include comments, docstrings, "
@@ -375,6 +501,12 @@ def generate_synthesis_prompt(sample, evidence_json, execution_summary):
         "Do not choose, rank, recommend, or imply a preferred candidate. Do not output a prediction.\n\n"
         "Synthesis goals:\n"
         "- Convert factual surface observations and deep investigations into an evidence summary without inventing facts.\n"
+        "- Treat the deep research specification as intent rather than evidence. Only facts actually returned by "
+        "executed deep investigations count as evidence.\n"
+        "- Check plan_fulfillment and downweight planned investigations that were partial, failed, or missing from "
+        "the executed evidence.\n"
+        "- If deep evidence validation issues are present or the executed deep evidence was rejected, do not use "
+        "the rejected deep observations as evidence.\n"
         "- Interpret what kind of bundle or relationship the partial input represents.\n"
         "- State a cautious missing-role hypothesis when the evidence supports one.\n"
         "- Explain how each candidate relates to the source observations and deep investigations across metadata, "
@@ -430,6 +562,30 @@ def generate_synthesis_prompt(sample, evidence_json, execution_summary):
         '  "limitations": ["overall limitation"],\n'
         '  "sources_used": ["file name used"]\n'
         "}\n"
+    )
+
+
+def generate_synthesis_repair_prompt(
+    sample,
+    evidence_json,
+    execution_summary,
+    previous_raw_response,
+    validation_issues,
+):
+    base_prompt = generate_synthesis_prompt(sample, evidence_json, execution_summary)
+    return (
+        "You are repairing an evidence-synthesis response that was not valid complete JSON.\n"
+        "Regenerate the entire synthesis from the supplied evidence. Return one complete valid JSON object only.\n"
+        "Do not continue the previous response from its cutoff point. Start the JSON object again from the "
+        "beginning. Keep strings and arrays concise so the complete object fits within the output budget. Include "
+        "every candidate label exactly once and preserve all grounding, reliability, conflict, and limitation "
+        "requirements from the original synthesis task.\n\n"
+        "Validation issues detected:\n"
+        f"{json.dumps(validation_issues, ensure_ascii=False, indent=2)}\n\n"
+        "Original synthesis task:\n"
+        f"{base_prompt}\n\n"
+        "Previous invalid or truncated response, provided only to diagnose what must be regenerated:\n"
+        f"{str(previous_raw_response or '')[:12000]}\n"
     )
 
 

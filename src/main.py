@@ -347,14 +347,24 @@ def save_results(results, conf, timestamp, partial=False):
         df["cfg_two_stage_prediction_api_key_env"] = conf.get("two_stage_prediction_api_key_env", "")
         df["cfg_three_stage_code_api_key_env"] = conf.get("three_stage_code_api_key_env", "")
         df["cfg_three_stage_deep_code_api_key_env"] = conf.get("three_stage_deep_code_api_key_env", "")
+        df["cfg_three_stage_deep_planning_model"] = conf.get(
+            "three_stage_deep_planning_model", ""
+        )
+        df["cfg_three_stage_deep_code_model"] = conf.get("three_stage_deep_code_model", "")
         df["cfg_three_stage_synthesis_api_key_env"] = conf.get("three_stage_synthesis_api_key_env", "")
         df["cfg_three_stage_prediction_api_key_env"] = conf.get("three_stage_prediction_api_key_env", "")
         df["cfg_three_stage_code_max_output_tokens"] = conf.get("three_stage_code_max_output_tokens", "")
+        df["cfg_three_stage_deep_planning_max_output_tokens"] = conf.get(
+            "three_stage_deep_planning_max_output_tokens", ""
+        )
         df["cfg_three_stage_deep_code_max_output_tokens"] = conf.get(
             "three_stage_deep_code_max_output_tokens", ""
         )
         df["cfg_three_stage_synthesis_max_output_tokens"] = conf.get(
             "three_stage_synthesis_max_output_tokens", ""
+        )
+        df["cfg_three_stage_synthesis_max_repair_attempts"] = conf.get(
+            "three_stage_synthesis_max_repair_attempts", ""
         )
         df["cfg_three_stage_prediction_max_output_tokens"] = conf.get(
             "three_stage_prediction_max_output_tokens", ""
@@ -418,6 +428,7 @@ async def process_samples(
                         conf,
                         {
                             "code": code_client or prediction_client,
+                            "deep_planning": deep_code_client or code_client or prediction_client,
                             "deep_code": deep_code_client or code_client or prediction_client,
                             "synthesis": synthesis_client or prediction_client,
                             "prediction": agent_prediction_client or prediction_client,

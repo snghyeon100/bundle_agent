@@ -5,7 +5,7 @@ data_path: ./datasets
 # Evaluation
 num_cans: 10                # number of candidates including the answer
 num_token: 5                # max input items per bundle (-1 = no limit)
-toy_eval: 250               # -1 = full test set | N = first N samples
+toy_eval: 250           # -1 = full test set | N = first N samples
 seed: 45                    # seed for candidate items
 shuffle_seed: 41            # seed for input item order
 
@@ -32,12 +32,17 @@ two_stage_prediction_api_key_env: "GEMINI_API_KEY_4"   # active only when use_tw
 # Three-stage exploratory retrieval -> synthesis -> prediction agent
 use_three_stage_agent: true
 three_stage_code_api_key_env: "GEMINI_API_KEY_2"
-three_stage_deep_code_api_key_env: "GEMINI_API_KEY_2"
+three_stage_deep_code_api_key_env: "GEMINI_API_KEY_1"
+# Empty model overrides use the global model. Set a stronger compatible model for adaptive research planning.
+three_stage_deep_planning_model: ""
+three_stage_deep_code_model: ""
 three_stage_synthesis_api_key_env: "GEMINI_API_KEY_3"
 three_stage_prediction_api_key_env: "GEMINI_API_KEY_4"
 three_stage_code_max_output_tokens: 3600
+three_stage_deep_planning_max_output_tokens: 1800
 three_stage_deep_code_max_output_tokens: 3600
-three_stage_synthesis_max_output_tokens: 1800
+three_stage_synthesis_max_output_tokens: 3600
+three_stage_synthesis_max_repair_attempts: 1
 three_stage_prediction_max_output_tokens: 900
 three_stage_code_max_repair_attempts: 1
 
