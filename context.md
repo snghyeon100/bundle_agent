@@ -608,3 +608,210 @@ Example full run:
 ```powershell
 python utils\train_lightgcn_features.py --dataset pog_dense --graphs ui bi --embedding-dim 64 --num-layers 3 --epochs 100
 ```
+
+## 2026-06-22 New Methodology Direction: Progressive Signal Discovery
+
+The next method should keep the source-grounded, code-generating multi-agent pipeline:
+
+```text
+Partial bundle + candidates
+        -> Source Schema Reader
+        -> Signal Planner
+        -> Python Signal Code Generator
+        -> Code Executor
+        -> Signal Diagnosis
+        -> Adaptive Re-planning if needed
+        -> Evidence JSON
+        -> Decision Agent
+        -> Final candidate
+```
+
+However, the first Signal Planner should not try to predict which signal will be important from item text and categories alone. Before execution, it has no empirical basis for knowing whether direct bundle relations, user interactions, metadata, embeddings, or another derived structure will be informative for the current case. Asking it to choose important signals too early encourages semantic guessing and easy fixed recipes.
+
+The new direction is therefore:
+
+```text
+broad source-grounded observation
+        -> empirical signal diagnosis
+        -> open-ended evidence-gap-driven investigation
+        -> verified evidence synthesis and decision
+```
+
+### Round 1: Broad Surface Signal Observation
+
+The first planner is a coverage planner rather than an importance planner. It uses the current partial bundle, all candidates, and a Source Capability Manifest to ensure broad factual observation across the allowed sources. It must not rank candidates, choose a winner, or claim that a signal is important before seeing the executed results.
+
+Round 1 should provide stable candidate coverage and basic source observations such as metadata relationships, candidate and input-candidate occurrence facts, source coverage and missingness, and available representation-level comparisons. These are surface observations, not a final scoring model. The exact input format and source contracts should follow the repository's real dataset representation rather than the illustrative input schema in the external implementation specification.
+
+The Source Schema Reader should describe source affordances, not prescribe a scoring recipe. A machine-readable Source Capability Manifest may include:
+
+```json
+{
+  "source": "bi_train.txt",
+  "entities": ["bundle", "item"],
+  "relations": ["bundle contains item"],
+  "supported_operations": ["filter", "invert", "join", "aggregate", "retrieve examples"],
+  "constraints": ["the first value is a typed bundle id", "train data only"]
+}
+```
+
+### Signal Diagnosis After Execution
+
+Signal importance should be assessed only after code execution. The diagnosis stage examines the actual observations for:
+
+- candidate and source coverage;
+- missing, all-zero, or tied outputs;
+- candidate discrimination and numeric margins;
+- direct versus indirect evidence;
+- redundancy between signals;
+- single-source or popularity dominance;
+- conflicts between sources or views;
+- provenance and plan-fulfillment problems;
+- possible confusion between similarity, compatibility, and redundancy.
+
+Diagnosis should report facts, reliable observations, and unresolved evidence gaps. It should not prescribe a retrieval method. In particular, it should not tell the next planner to find similar bundles, retrieve similar candidate items, apply category smoothing, or execute a specific multi-hop recipe.
+
+Recommended diagnosis contract:
+
+```json
+{
+  "reliable_observations": [],
+  "observed_failures": [],
+  "unresolved_questions": [],
+  "evidence_gaps": [],
+  "conflicts": [],
+  "signals_to_downweight": []
+}
+```
+
+### Round 2: Open-Ended Deep Signal Discovery
+
+Round 2 is driven by the executed Round 1 evidence and diagnosis. Its purpose is not to generate something merely labeled a "deep signal." It should design executable investigations that can resolve concrete evidence gaps or distinguish competing explanations for the current observations.
+
+Possible outcomes of this process could include discovering related historical bundles, examining historical contexts of items related to a candidate, deriving new graph paths, joining sources, comparing distributions, or devising other train-safe analyses. These are illustrative emergent outcomes only. They should not be included in the Deep Planner prompt as a required checklist or menu of methods. The LLM should invent the investigation based on the current case, observed evidence, source entities and relations, and execution constraints.
+
+The central prompting principle is:
+
+> Constrain the quality, grounding, and boundaries of the investigation, not the investigation method.
+
+The Deep Planner should receive:
+
+- the partial bundle and candidates;
+- the Source Capability Manifest and file contracts;
+- executed Round 1 factual observations;
+- reliable and downweighted signals;
+- conflicts, failed signals, and unresolved evidence gaps;
+- summaries of previous investigations;
+- candidate coverage, leakage, runtime, and output constraints.
+
+It should return a research specification rather than code or a prediction:
+
+```json
+{
+  "research_objective": "...",
+  "investigations": [
+    {
+      "question": "...",
+      "competing_explanations": ["...", "..."],
+      "why_needed": "...",
+      "sources_used": ["..."],
+      "derivation_path": ["..."],
+      "method_design": "LLM-designed executable investigation",
+      "new_information": "...",
+      "possible_outcomes": {
+        "positive": "...",
+        "negative": "..."
+      },
+      "distinction_from_surface": "...",
+      "expected_candidate_scope": "all candidates",
+      "failure_condition": "..."
+    }
+  ],
+  "stop_condition": "..."
+}
+```
+
+Requiring competing explanations and outcome-dependent interpretation prevents the planner from creating new numbers that cannot change the evidence assessment. If positive and negative results would lead to the same interpretation, the proposed investigation has low information value and should be rejected.
+
+### Investigation Proposal Tournament
+
+A vague instruction to produce deep evidence often collapses to file diagnostics, direct counts, or cosine similarity. To improve autonomous discovery without hard-coding recipes, the Deep Planner should use an investigation proposal tournament:
+
+1. Frame each unresolved evidence gap as a factual question with competing explanations.
+2. Internally generate multiple distinct executable investigation proposals.
+3. Compare them by novelty, expected information gain, candidate discrimination, grounding, robustness, independence, coverage, and feasibility.
+4. Select a small non-redundant portfolio of investigations.
+5. Return only the selected research specification.
+
+The planner may be given an investigation grammar consisting of source entities, relations, and generic transformations such as filter, invert, join, expand, aggregate, compare, retrieve examples, and test robustness. These are compositional primitives rather than completed retrieval recipes.
+
+When practical, selected proposals should first run small pilot probes. Probe outputs can report execution success, candidate coverage, nonzero coverage, distinct-value counts, representative observations, and dominance warnings. The planner can then retain, revise, or discard proposals based on real data behavior before generating the full deep investigation code. This changes planning from one-shot speculation into observation-guided research.
+
+### Deepness and Novelty Validation
+
+An investigation should not be accepted as deep merely because it uses a new signal name. The validator or critic should reject investigations limited to:
+
+- file existence checks, row counts, or tensor shapes;
+- a repetition of candidate frequency or direct one-hop counts already present in Round 1;
+- a single unchanged cosine similarity calculation;
+- renaming, renormalizing, or reweighting an existing surface observation;
+- aggregate values without candidate-scoped provenance or representative examples;
+- a method whose possible outcomes do not change the interpretation of an evidence gap.
+
+This is an anti-redundancy constraint, not a requirement to use a particular graph depth, source combination, or retrieval algorithm. A simple investigation may still be accepted when it produces genuinely new, grounded, discriminative evidence for an unresolved question.
+
+### Planning, Code Generation, Repair, and Re-planning
+
+The research planner and code generator should remain separate:
+
+- The Deep Planner decides what new factual question to investigate and writes the fixed research specification.
+- The Deep Code Generator implements that specification without replacing it with an easier lookup.
+- Code repair preserves the research specification and changes only implementation defects.
+- Research re-planning occurs only when the executed investigation is uninformative, redundant, infeasible, or leaves the evidence gap unresolved.
+
+Execution failure and research failure must therefore be treated differently:
+
+```text
+execution error -> repair the implementation
+weak or redundant evidence -> redesign the investigation
+inconclusive but valid evidence -> record the limitation and either deepen or stop
+```
+
+### Evidence JSON and Final Decision
+
+The final Evidence JSON should contain verified candidate-scoped observations, provenance, representative examples when available, diagnosis, conflicts, reliability, and limitations. It should distinguish direct historical evidence from evidence derived through similarity or other indirect transformations. It should not force every observation into one scalar `final_score` before the Decision Agent sees it.
+
+The Decision Agent receives the compact verified evidence rather than raw code, raw execution logs, or unvalidated planner claims. It is the only stage allowed to choose the final candidate. It must account for evidence quality, sparsity, source conflict, downweighted signals, and the difference between compatibility and mere similarity.
+
+### Working Method Name
+
+The current working name is:
+
+```text
+Progressive Signal Discovery
+```
+
+The intended research framing is a training-free, source-grounded, code-generating multi-agent method that first establishes broad empirical coverage and then lets an LLM autonomously design deeper investigations from observed evidence gaps. Its novelty should come from evidence-driven signal discovery and adaptive executable investigation, not from a fixed library of recommendation scorers.
+
+### 2026-06-22 Initial Code Draft
+
+The first Progressive Signal Discovery code draft is implemented under `src/progressive_signal_agent/`. The earlier `src/agents/`, `src/three_stage_agent/`, and `src/two_stage_agent/` implementations and the three-stage standalone runner were removed. `src/main.py` now runs only the new method, and `config.yaml` contains only options consumed by this pipeline.
+
+The canonical case exposed to the agent is ID-centered:
+
+```json
+{
+  "case_id": "bundle_418",
+  "dataset": "pog",
+  "bundle_id": 418,
+  "partial_item_ids": [154, 932],
+  "candidates": [
+    {"label": "A", "item_id": 281},
+    {"label": "B", "item_id": 719}
+  ]
+}
+```
+
+The real `bundle_id` is retained because generated investigations may need typed bundle context from allowed train sources. It must never be treated as an item ID. Ground truth, true-option fields, test-GT paths, predictions, hits, and result files are filtered out of the agent view.
+
+The initial implementation performs one broad planning/code/execution round, diagnoses the executed evidence, and runs up to `psd_max_deep_rounds` open-ended planning/code/execution rounds when diagnosis returns `NEEDS_DEEPENING`. Each deep planner prompt requires an internal proposal tournament but does not provide completed retrieval recipes. Only evidence that passes execution and candidate-scope validation is included in the final Evidence JSON.

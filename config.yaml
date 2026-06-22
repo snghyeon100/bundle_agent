@@ -1,86 +1,56 @@
 # Dataset
-dataset: pog          # pog | pog_dense | spotify | spotify_sparse
+dataset: pog                   # pog | pog_dense | spotify | spotify_sparse
 data_path: ./datasets
 
 # Evaluation
-num_cans: 10                # number of candidates including the answer
-num_token: 5                # max input items per bundle (-1 = no limit)
-toy_eval: 250           # -1 = full test set | N = first N samples
-seed: 45                    # seed for candidate items
-shuffle_seed: 41            # seed for input item order
+num_cans: 10                  # candidates including the answer
+num_token: 5                  # max partial-bundle items (-1 = no limit)
+toy_eval: 250                 # -1 = full test set | N = first N samples
+seed: 45                      # negative-candidate sampling seed
+shuffle_seed: 41              # partial-item order seed
 
 # LLM
 llm_provider: gemini          # gemini | openai
 model: gemini-3.1-flash-lite
-# OpenAI example:
-# llm_provider: openai
-# model: gpt-4o
 temperature: 0.0
-openai_send_temperature: false # keep false for GPT-5 models; true only for OpenAI models that support temperature
-openai_reasoning_effort: "" # for GPT-5 models: minimal | low | medium | high
-max_output_tokens: 10
-prediction_api_key_env: "GEMINI_API_KEY_1"       # empty = provider default envs (Gemini: GEMINI_API_KEY/GOOGLE_API_KEY, OpenAI: OPENAI_API_KEY)
-reasoning_api_key_env: "GEMINI_API_KEY_2"        # empty = prediction key env, then provider default envs
-use_candidate_reasoning: false
-candidate_reasoning_max_output_tokens: 1200
+openai_send_temperature: false
+openai_reasoning_effort: ""   # minimal | low | medium | high
 
-# Two-stage code retrieval agent
-use_two_stage_agent: false
-two_stage_code_api_key_env: "GEMINI_API_KEY_3"         # active only when use_two_stage_agent is true
-two_stage_prediction_api_key_env: "GEMINI_API_KEY_4"   # active only when use_two_stage_agent is true
+# Progressive Signal Discovery stage clients
+# Empty values fall back to an earlier stage key, then the provider default.
+psd_planning_api_key_env: "GEMINI_API_KEY_1"
+psd_code_api_key_env: "GEMINI_API_KEY_2"
+psd_diagnosis_api_key_env: "GEMINI_API_KEY_3"
+psd_prediction_api_key_env: "GEMINI_API_KEY_4"
 
-# Three-stage exploratory retrieval -> synthesis -> prediction agent
-use_three_stage_agent: true
-three_stage_code_api_key_env: "GEMINI_API_KEY_2"
-three_stage_deep_code_api_key_env: "GEMINI_API_KEY_1"
-# Empty model overrides use the global model. Set a stronger compatible model for adaptive research planning.
-three_stage_deep_planning_model: ""
-three_stage_deep_code_model: ""
-three_stage_synthesis_api_key_env: "GEMINI_API_KEY_3"
-three_stage_prediction_api_key_env: "GEMINI_API_KEY_4"
-three_stage_code_max_output_tokens: 3600
-three_stage_deep_planning_max_output_tokens: 1800
-three_stage_deep_code_max_output_tokens: 3600
-three_stage_synthesis_max_output_tokens: 3600
-three_stage_synthesis_max_repair_attempts: 1
-three_stage_prediction_max_output_tokens: 900
-three_stage_code_max_repair_attempts: 1
+# Stage generation budgets
+psd_broad_planning_max_output_tokens: 1600
+psd_code_max_output_tokens: 4000
+psd_diagnosis_max_output_tokens: 1800
+psd_deep_planning_max_output_tokens: 2400
+psd_prediction_max_output_tokens: 1200
 
-# Stage 1 standalone runner
-stage1_api_key_env: "GEMINI_API_KEY_2"       # empty = three_stage_code_api_key_env, prediction key env, then provider default envs
-stage1_output_dir: ./analysis/stage1
+# Adaptive discovery loop
+psd_max_deep_rounds: 1
+psd_code_max_repair_attempts: 1
+psd_current_bundle_train_context_policy: allow  # allow | exclude
 
-# Four-stage code-writing agent
-use_four_stage_agent: false
-agent_planning_api_key_env: "OPENAI_API_KEY"       # four-stage only: empty = prediction key env, then provider default envs
-agent_code_api_key_env: "OPENAI_API_KEY"           # four-stage only: empty = planning/prediction key env, then provider default envs
-agent_verifier_api_key_env: "OPENAI_API_KEY"       # four-stage only: empty = planning/prediction key env, then provider default envs
-agent_prediction_api_key_env: "OPENAI_API_KEY"     # four-stage only: empty = prediction/planning key env, then provider default envs
-agent_planning_max_output_tokens: 1600
-agent_code_max_output_tokens: 2200
-agent_verifier_max_output_tokens: 800
-agent_prediction_max_output_tokens: 800
-agent_max_retrieval_rounds: 2
-agent_workspace_root: ./agent_workspaces
-agent_evidence_output_file: output/evidence.json
-agent_code_timeout_seconds: 30
-agent_code_max_stdout_chars: 20000
-agent_code_max_stderr_chars: 8000
-agent_code_max_repair_attempts: 1
-agent_enable_code_guard: true
-agent_allowed_files:
+# Generated-code workspace and safety
+psd_workspace_root: ./agent_workspaces
+psd_code_timeout_seconds: 45
+psd_code_max_stdout_chars: 24000
+psd_code_max_stderr_chars: 10000
+psd_enable_code_guard: true
+psd_allowed_files:
   - count.json
   - item_info.json
   - bi_train.txt
   - ui_full.txt
   - content_feature.pt
   - description_feature.pt
-agent_allow_interaction_embeddings: false
-agent_extra_data_paths: []
 
+# Retry and execution
 max_retries: 5
 retry_wait_seconds: 30
-
-# Execution
 max_concurrent: 1
 output_dir: ./results

@@ -1,16 +1,17 @@
 # Bundle Agent
 
-Minimal zero-shot bundle completion baseline.
+Training-free bundle completion with **Progressive Signal Discovery**.
 
-This repo keeps the baseline method as the default:
+For each partial bundle and candidate set, the runner:
 
-- text-only prompt
-- multiple-choice prediction
-- no ranking mode
-- no multimodal input
-- no hard negatives
-- no co-occurrence features
-- no graph, category, ICL, user, or retrieval context
+1. builds a train-safe Source Capability Manifest;
+2. plans broad source coverage without predicting signal importance;
+3. generates and executes Python surface-observation code;
+4. diagnoses the observed evidence;
+5. autonomously plans and executes deeper investigations when evidence gaps remain;
+6. passes compact verified Evidence JSON to the final Decision Agent.
+
+The canonical agent input contains the real `bundle_id`, partial item IDs, and candidate label–item ID mappings. Item metadata and representative examples are retrieved from allowed sources and recorded with provenance. Ground truth, test GT files, predictions, hits, and result files are never exposed to generated code.
 
 ## Run
 
@@ -19,18 +20,22 @@ pip install -r requirements.txt
 python src/main.py --config config.yaml
 ```
 
-The default `data_path` points to `./datasets`, which is ignored by Git because the dataset and embedding files are large.
+Resume a partial run with:
 
-## Candidate Reasoning Method
+```powershell
+python src/main.py --config config.yaml --resume path\to\partial.csv
+```
 
-Set `use_candidate_reasoning: true` in `config.yaml` to use the two-step `candidate_reasoning` method. The first step asks the model once to write pure English reasoning for all candidates. The second step passes those candidate reasoning outputs back to the model and asks for the final single-letter prediction.
+The default `data_path` is `./datasets`. Dataset files, generated workspaces, and result files are local artifacts ignored by Git.
 
-When disabled, the code runs the original baseline prompt directly.
+## Method configuration
 
-## Retry Behavior
+`config.yaml` contains only the Progressive Signal Discovery runner's dataset, LLM, stage budget, adaptive-loop, workspace, safety, retry, and execution settings.
 
-The runner retries retryable service errors such as `503`, high-demand, overloaded, or temporarily unavailable responses. Quota or permission errors such as `403` stop the run immediately. Only fully completed samples are written to the partial CSV, so resuming starts from the next unfinished sample.
+The current bundle's train-side context policy is explicit:
 
-## Separate API Keys
+```yaml
+psd_current_bundle_train_context_policy: allow  # allow | exclude
+```
 
-Set `prediction_api_key_env` and `reasoning_api_key_env` in `config.yaml` to use different environment variables for final prediction calls and the single candidate reasoning call. Leave either option empty to fall back to `GEMINI_API_KEY` or `GOOGLE_API_KEY`.
+The policy is included in every Source Capability Manifest so generated investigations can distinguish same-bundle train context from other historical contexts.
