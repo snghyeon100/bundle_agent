@@ -18,6 +18,7 @@ from progressive_signal_agent.workspace import (
     prepare_workspace,
 )
 
+from .affordance_graph import build_evidence_affordance_graph
 from .prompts import (
     code_repair_prompt,
     decision_prompt,
@@ -233,6 +234,41 @@ def normalize_evaluation(value, remaining_refinement_rounds):
     return normalized
 
 
+def merge_reliable_evidence(previous_evidence, previous_evaluation, current_evidence):
+    """Carry forward previously reliable signals and overlay the current round."""
+    if not isinstance(current_evidence, dict):
+        return current_evidence
+
+    current_signals = current_evidence.get("signals", [])
+    if not isinstance(current_signals, list):
+        current_signals = []
+    current_names = {
+        str(signal.get("signal_name", "")).strip()
+        for signal in current_signals
+        if isinstance(signal, dict)
+    }
+
+    reliable_names = set()
+    if isinstance(previous_evaluation, dict):
+        reliable = previous_evaluation.get("reliable_signals", [])
+        if isinstance(reliable, list):
+            reliable_names = {str(name).strip() for name in reliable if str(name).strip()}
+
+    preserved = []
+    if isinstance(previous_evidence, dict):
+        previous_signals = previous_evidence.get("signals", [])
+        if isinstance(previous_signals, list):
+            preserved = [
+                signal
+                for signal in previous_signals
+                if isinstance(signal, dict)
+                and str(signal.get("signal_name", "")).strip() in reliable_names
+                and str(signal.get("signal_name", "")).strip() not in current_names
+            ]
+
+    return {"signals": [*preserved, *current_signals]}
+
+
 def _compact_execution_context(result, validation_issues):
     summary = execution_summary(result)
     stdout = str(result.get("stdout") or "")
@@ -418,6 +454,66 @@ def _parse_prediction(raw_text, parser, labels):
     return prediction, parsed
 
 
+async def run_simple_signal_stage1(
+    sample,
+    conf,
+    code_client,
+    generate_content_fn,
+    debug_callback=None,
+):
+    """Run only the initial signal-code generation, execution, repair, and validation stage."""
+    case_view = build_case_view(sample, conf["dataset"])
+    labels = candidate_labels(case_view)
+    workspace = prepare_workspace(conf, config_prefix=CONFIG_PREFIX)
+    source_manifest = build_source_manifest(
+        workspace,
+        str(conf.get("simple_signal_current_bundle_train_context_policy", "allow")),
+    )
+    affordance_graph = build_evidence_affordance_graph(source_manifest, conf["dataset"])
+    max_evidence_chars = int(conf.get("simple_signal_max_evidence_chars", 30000))
+    output_file = f"output/simple_signal_evidence_bundle{sample['bundle_id']}_round1.json"
+    prompt = signal_code_prompt(
+        case_view,
+        source_manifest,
+        affordance_graph,
+        output_file,
+        max_evidence_chars,
+        refinement_context=None,
+    )
+    if debug_callback:
+        debug_callback("Simple Signal Stage 1 Code Prompt", prompt)
+
+    code_result = await _generate_execute_repair(
+        sample_bundle_id=sample["bundle_id"],
+        round_index=0,
+        case_view=case_view,
+        source_manifest=source_manifest,
+        initial_prompt=prompt,
+        client=code_client,
+        conf=conf,
+        generate_content_fn=generate_content_fn,
+        workspace=workspace,
+        output_file=output_file,
+        labels=labels,
+    )
+    return {
+        "method": "simple_generate_evaluate_decide_stage1_only",
+        "case": case_view,
+        "workspace_dir": workspace["workspace_dir"],
+        "workspace_files": workspace["files"],
+        "copied_files": workspace["copied_files"],
+        "source_manifest": source_manifest,
+        "evidence_affordance_graph": affordance_graph,
+        "code_prompt": prompt,
+        "code_raw_response": code_result["raw_response"],
+        "generated_code": code_result["generated_code"],
+        "code_repairs": code_result["repairs"],
+        "execution_summary": code_result["execution_summary"],
+        "validation_issues": code_result["validation_issues"],
+        "accepted_evidence": code_result["accepted_evidence"],
+    }
+
+
 async def run_simple_signal_agent(
     sample,
     conf,
@@ -434,6 +530,7 @@ async def run_simple_signal_agent(
         workspace,
         str(conf.get("simple_signal_current_bundle_train_context_policy", "allow")),
     )
+    affordance_graph = build_evidence_affordance_graph(source_manifest, conf["dataset"])
     max_refinements = max(0, int(conf.get("simple_signal_max_refinement_rounds", 1)))
     max_evidence_chars = int(conf.get("simple_signal_max_evidence_chars", 30000))
 
@@ -450,6 +547,7 @@ async def run_simple_signal_agent(
         code_prompt = signal_code_prompt(
             case_view,
             source_manifest,
+            affordance_graph,
             output_file,
             max_evidence_chars,
             refinement_context=refinement_context,
@@ -471,6 +569,7 @@ async def run_simple_signal_agent(
             labels=labels,
         )
         evidence = code_result["accepted_evidence"]
+        evidence_for_evaluation = None
         remaining = max_refinements - round_index
         evaluation_prompt = ""
         evaluation_raw = ""
@@ -481,12 +580,18 @@ async def run_simple_signal_agent(
                 + "; ".join(code_result["validation_issues"])
             )
         else:
+            evidence_for_evaluation = merge_reliable_evidence(
+                final_evidence,
+                final_evaluation,
+                evidence,
+            )
             evaluation_prompt = sufficiency_evaluation_prompt(
                 case_view,
                 source_manifest,
+                affordance_graph,
                 code_result["generated_code"],
                 code_result["execution_summary"],
-                evidence,
+                evidence_for_evaluation,
                 round_index,
                 remaining,
                 evaluation_history,
@@ -509,7 +614,7 @@ async def run_simple_signal_agent(
                 parse_json_from_text(evaluation_raw),
                 remaining,
             )
-            final_evidence = evidence
+            final_evidence = evidence_for_evaluation
 
         round_trace.append(
             {
@@ -521,6 +626,7 @@ async def run_simple_signal_agent(
                 "execution_summary": code_result["execution_summary"],
                 "validation_issues": code_result["validation_issues"],
                 "accepted_evidence": evidence,
+                "evidence_for_evaluation": evidence_for_evaluation,
                 "evaluation_prompt": evaluation_prompt,
                 "evaluation_raw_response": evaluation_raw,
                 "evaluation": final_evaluation,
@@ -533,7 +639,7 @@ async def run_simple_signal_agent(
         evaluation_history.append(final_evaluation)
         refinement_context = {
             "previous_code": code_result["generated_code"],
-            "previous_evidence": evidence,
+            "previous_evidence": final_evidence,
             "execution_summary": code_result["execution_summary"],
             "evaluator_feedback": final_evaluation,
         }
@@ -542,21 +648,9 @@ async def run_simple_signal_agent(
         final_evidence = {"signals": []}
 
     decision_case = build_decision_case(sample, conf)
-    refinement_history = [
-        {
-            "round": trace["round"],
-            "status": trace["evaluation"].get("status", "INCONCLUSIVE"),
-            "evidence_quality": trace["evaluation"].get("evidence_quality", "NONE"),
-            "evidence_gaps": trace["evaluation"].get("evidence_gaps", []),
-            "required_improvements": trace["evaluation"].get("required_improvements", []),
-        }
-        for trace in round_trace
-    ]
     final_prompt = decision_prompt(
         decision_case,
         final_evidence,
-        final_evaluation,
-        refinement_history,
     )
     if is_first_sample and debug_callback:
         debug_callback("Simple Signal Final Decision Prompt", final_prompt)
@@ -575,6 +669,7 @@ async def run_simple_signal_agent(
         "simple_signal_workspace_dir": workspace["workspace_dir"],
         "simple_signal_workspace_files": compact_json(workspace["files"]),
         "simple_signal_source_manifest": compact_json(source_manifest),
+        "simple_signal_evidence_affordance_graph": compact_json(affordance_graph),
         "simple_signal_case_view": compact_json(case_view),
         "simple_signal_decision_case": compact_json(decision_case),
         "simple_signal_round_count": len(round_trace),

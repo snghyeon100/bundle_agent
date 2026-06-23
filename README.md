@@ -28,6 +28,14 @@ Resume a partial run with:
 python src/main.py --config config.yaml --resume path\to\partial.csv
 ```
 
+Run only Simple Generate-Evaluate-Decide Stage 1 with the real configured API:
+
+```powershell
+python tests\run_simple_signal_stage1.py --config config.yaml --sample_idx 0 --limit 1 --debug
+```
+
+This calls only the code-generation client, executes and validates the generated code, and performs configured code repair when necessary. It does not call the Sufficiency Evaluator or Decision Agent. The complete trace is saved under `analysis/simple_signal_stage1/` by default.
+
 The default `data_path` is `./datasets`. Dataset files, generated workspaces, and result files are local artifacts ignored by Git.
 
 ## Method configuration

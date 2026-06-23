@@ -76,16 +76,167 @@ SOURCE_CONTRACTS = {
 }
 
 
-def _source_contract(filename):
+DATASET_SOURCE_CONTRACTS = {
+    "pog": {
+        "item_info.json": {
+            "format": "JSON object keyed by canonical integer item_id encoded as a string",
+            "fields": {
+                "id": "external product identifier; not the canonical integer item_id",
+                "cate": "category identifier",
+                "pic": "item image URL",
+                "title": "item title text",
+            },
+        },
+        "content_feature.pt": {
+            "modality": "image",
+            "encoder": "BLIP image encoder (exact checkpoint/version not recorded)",
+            "expected_shape": ["#I", 768],
+            "row_alignment": "tensor row index equals canonical integer item_id",
+            "normalization": "not recorded; inspect norms before assuming unit normalization",
+            "cross_file_comparability": (
+                "Do not assume direct comparability with description_feature.pt unless the aligned BLIP "
+                "image-text provenance is independently confirmed."
+            ),
+        },
+        "description_feature.pt": {
+            "modality": "text",
+            "encoder": "text embedding encoder (exact model/checkpoint not recorded)",
+            "expected_shape": ["#I", 768],
+            "row_alignment": "tensor row index equals canonical integer item_id",
+            "normalization": "not recorded; inspect norms before assuming unit normalization",
+            "cross_file_comparability": (
+                "Do not assume direct comparability with content_feature.pt unless aligned image-text "
+                "provenance is independently confirmed."
+            ),
+        },
+    },
+    "pog_dense": {
+        "item_info.json": {
+            "format": "JSON object keyed by canonical integer item_id encoded as a string",
+            "fields": {
+                "id": "external product identifier; not the canonical integer item_id",
+                "cate_id": "category identifier",
+                "pic_url": "item image URL",
+                "title": "item title text",
+            },
+        },
+        "content_feature.pt": {
+            "modality": "image",
+            "encoder": "BLIP image encoder (exact checkpoint/version not recorded)",
+            "expected_shape": ["#I", 768],
+            "row_alignment": "tensor row index equals canonical integer item_id",
+            "normalization": "not recorded; inspect norms before assuming unit normalization",
+            "cross_file_comparability": (
+                "Do not assume direct comparability with description_feature.pt unless the aligned BLIP "
+                "image-text provenance is independently confirmed."
+            ),
+        },
+        "description_feature.pt": {
+            "modality": "text",
+            "encoder": "text embedding encoder (exact model/checkpoint not recorded)",
+            "expected_shape": ["#I", 768],
+            "row_alignment": "tensor row index equals canonical integer item_id",
+            "normalization": "not recorded; inspect norms before assuming unit normalization",
+            "cross_file_comparability": (
+                "Do not assume direct comparability with content_feature.pt unless aligned image-text "
+                "provenance is independently confirmed."
+            ),
+        },
+    },
+    "spotify": {
+        "item_info.json": {
+            "format": "JSON object keyed by canonical integer item_id encoded as a string",
+            "fields": {
+                "pos": "dataset item position/index metadata",
+                "artist_name": "artist display name",
+                "track_uri": "external Spotify track URI; not the canonical integer item_id",
+                "artist_uri": "external Spotify artist URI",
+                "track_name": "track title",
+                "album_uri": "external Spotify album URI",
+                "duration_ms": "track duration in milliseconds",
+                "album_name": "album title",
+            },
+        },
+        "content_feature.pt": {
+            "modality": "audio",
+            "encoder": "CLAP audio encoder (exact checkpoint/version not recorded)",
+            "expected_shape": ["#I", 512],
+            "row_alignment": "tensor row index equals canonical integer item_id",
+            "normalization": "not recorded; inspect norms before assuming unit normalization",
+            "cross_file_comparability": (
+                "Compare with description_feature.pt only if that file is confirmed to use the aligned "
+                "CLAP text encoder from the same embedding space."
+            ),
+        },
+        "description_feature.pt": {
+            "modality": "text",
+            "encoder": "text embedding encoder (exact model/checkpoint not recorded)",
+            "expected_shape": ["#I", 512],
+            "row_alignment": "tensor row index equals canonical integer item_id",
+            "normalization": "not recorded; inspect norms before assuming unit normalization",
+            "cross_file_comparability": (
+                "Direct audio-text comparison is unverified until aligned CLAP text-encoder provenance "
+                "is confirmed."
+            ),
+        },
+    },
+    "spotify_sparse": {
+        "item_info.json": {
+            "format": "JSON object keyed by canonical integer item_id encoded as a string",
+            "fields": {
+                "pos": "dataset item position/index metadata",
+                "artist_name": "artist display name",
+                "track_uri": "external Spotify track URI; not the canonical integer item_id",
+                "artist_uri": "external Spotify artist URI",
+                "track_name": "track title",
+                "album_uri": "external Spotify album URI",
+                "duration_ms": "track duration in milliseconds",
+                "album_name": "album title",
+            },
+        },
+        "content_feature.pt": {
+            "modality": "audio",
+            "encoder": "CLAP audio encoder (exact checkpoint/version not recorded)",
+            "expected_shape": ["#I", 512],
+            "row_alignment": "tensor row index equals canonical integer item_id",
+            "normalization": "not recorded; inspect norms before assuming unit normalization",
+            "cross_file_comparability": (
+                "Compare with description_feature.pt only if that file is confirmed to use the aligned "
+                "CLAP text encoder from the same embedding space."
+            ),
+        },
+        "description_feature.pt": {
+            "modality": "text",
+            "encoder": "text embedding encoder (exact model/checkpoint not recorded)",
+            "expected_shape": ["#I", 512],
+            "row_alignment": "tensor row index equals canonical integer item_id",
+            "normalization": "not recorded; inspect norms before assuming unit normalization",
+            "cross_file_comparability": (
+                "Direct audio-text comparison is unverified until aligned CLAP text-encoder provenance "
+                "is confirmed."
+            ),
+        },
+    },
+}
+
+
+def _source_contract(filename, dataset=None):
     if filename.endswith("_LightGCN_bi_feature.pt"):
-        return {
+        contract = {
             "entities": ["item", "feature vector"],
             "relations": ["item has BI-LightGCN representation"],
             "format": (
                 "PyTorch item embedding derived from bi_train.txt; validate object type and item-axis alignment"
             ),
         }
-    return SOURCE_CONTRACTS.get(filename, {})
+    else:
+        contract = dict(SOURCE_CONTRACTS.get(filename, {}))
+    dataset_contract = DATASET_SOURCE_CONTRACTS.get(str(dataset or "").lower(), {}).get(
+        filename,
+        {},
+    )
+    contract.update(dataset_contract)
+    return contract
 
 
 def _method_setting(conf, prefix, name, default):
@@ -142,6 +293,7 @@ def prepare_workspace(conf, config_prefix="psd"):
         available.append({"name": filename, "path": f"data/{filename}"})
 
     return {
+        "dataset": conf["dataset"],
         "workspace_dir": workspace_dir,
         "data_dir": data_dir,
         "output_dir": output_dir,
@@ -153,16 +305,8 @@ def prepare_workspace(conf, config_prefix="psd"):
 def build_source_manifest(workspace, current_bundle_policy):
     sources = []
     for entry in workspace["files"]:
-        contract = _source_contract(entry["name"])
-        sources.append(
-            {
-                "name": entry["name"],
-                "path": entry["path"],
-                "entities": contract.get("entities", []),
-                "relations": contract.get("relations", []),
-                "format": contract.get("format", "Inspect safely before use"),
-            }
-        )
+        contract = _source_contract(entry["name"], workspace.get("dataset"))
+        sources.append({"name": entry["name"], "path": entry["path"], **contract})
     return {
         "sources": sources,
         "generic_transformations": [

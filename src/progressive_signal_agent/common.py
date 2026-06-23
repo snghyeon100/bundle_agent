@@ -37,8 +37,7 @@ def task_semantics(dataset):
         )
     return (
         "This is fashion outfit bundle completion. A partial bundle is a coordinated set of fashion items, "
-        "and each candidate is a possible missing item. Historical compatibility may involve complementary "
-        "roles, category composition, concept, seasonality, style, color, and material."
+        "and each candidate is a possible missing item whose compatibility with the partial bundle should be evaluated."
     )
 
 

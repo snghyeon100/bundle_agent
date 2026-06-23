@@ -854,6 +854,10 @@ item_cf_feature.pt
 
 `item_cf_feature.pt` is an item embedding trained from `ui_full.txt`. `{dataset}_LightGCN_bi_feature.pt` is an item embedding trained from `bi_train.txt`. This provenance is part of the source contract supplied by the user; generated code must still validate the serialized object type and item-index alignment before using either representation. No test ground truth, true label, hit, previous prediction, result file, `bi_full.txt`, or test-GT path may be exposed to any agent.
 
+Source manifests are dataset-specific rather than filename-only. The outer key of every `item_info.json` is the canonical integer item ID encoded as a string. POG uses `id`, `cate`, `pic`, and `title`; POG-dense uses `id`, `cate_id`, `pic_url`, and `title`; Spotify and Spotify-Sparse use `pos`, `artist_name`, `track_uri`, `artist_uri`, `track_name`, `album_uri`, `duration_ms`, and `album_name`. External product IDs and Spotify URIs must not be used as canonical integer item IDs.
+
+For POG and POG-dense, `content_feature.pt` is a 768-dimensional BLIP image embedding and `description_feature.pt` is a 768-dimensional text embedding. For Spotify and Spotify-Sparse, `content_feature.pt` is a 512-dimensional CLAP audio embedding and `description_feature.pt` is a 512-dimensional text embedding. In all four datasets, the expected first dimension is `#I` and the tensor row index is the canonical integer item ID. Exact checkpoints and stored-vector normalization are not recorded, so generated code must validate shape and norms. Direct content-description cosine comparison must not be assumed valid unless both files are independently confirmed to come from the corresponding aligned image-text or audio-text embedding space.
+
 BI/UI parsing retains the existing typed-ID rule:
 
 ```text
@@ -1043,3 +1047,5 @@ Each successful round is evaluated once. `REFINE` is accepted only when the eval
 Result rows use the `simple_signal_` prefix and store the workspace files, manifest, ID-only case, deterministic decision case, complete round trace, final evidence, final evaluation, final status/quality, and raw/parsed prediction response. The public `prediction`, `raw_response`, and `hit` columns remain compatible with existing evaluation and resume behavior. Result filenames include the selected method name.
 
 Offline tests in `tests/test_simple_signal_agent.py` cover minimal evidence validation, refinement-budget normalization, and an end-to-end fake-LLM flow through code generation, execution, evaluation, and prediction. The existing Progressive Signal Discovery smoke test remains passing after the shared workspace changes.
+
+A separate manual live-API runner is available at `tests/run_simple_signal_stage1.py`. It deliberately does not use the `test_` filename prefix, so automated unittest discovery cannot trigger paid API calls. It selects evaluation samples with the normal dataset loader, exposes only the ID-centered case to the Stage 1 code agent, calls the configured `simple_signal_code_api_key_env`, executes and validates the generated code, performs only configured implementation repairs, and saves the prompt, raw response, final code, execution summary, validation issues, and accepted evidence under `analysis/simple_signal_stage1/`. It never calls the Sufficiency Evaluator or Decision Agent.
