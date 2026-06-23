@@ -815,3 +815,231 @@ The canonical case exposed to the agent is ID-centered:
 The real `bundle_id` is retained because generated investigations may need typed bundle context from allowed train sources. It must never be treated as an item ID. Ground truth, true-option fields, test-GT paths, predictions, hits, and result files are filtered out of the agent view.
 
 The initial implementation performs one broad planning/code/execution round, diagnoses the executed evidence, and runs up to `psd_max_deep_rounds` open-ended planning/code/execution rounds when diagnosis returns `NEEDS_DEEPENING`. Each deep planner prompt requires an internal proposal tournament but does not provide completed retrieval recipes. Only evidence that passes execution and candidate-scope validation is included in the final Evidence JSON.
+
+## 2026-06-23 New Methodology Draft: Simple Generate-Evaluate-Decide
+
+This is an implemented simpler methodology to compare with Progressive Signal Discovery. The working name is `Simple Generate-Evaluate-Decide`; it is not yet a final research name. The method keeps source-grounded code generation but removes the separate broad planner, deep investigation planner, and multi-round progressive discovery structure.
+
+The proposed flow is:
+
+```text
+ID-centered case
+        -> Signal Code Generator
+        -> Python Executor
+        -> Minimal candidate-scoped Evidence JSON
+        -> Signal Sufficiency Evaluator
+             -> REFINE: return diagnostic feedback to the Code Generator
+             -> SUFFICIENT: continue to the Decision Agent
+             -> INCONCLUSIVE: stop refinement and continue with explicit low-quality evidence
+        -> Decision Agent
+        -> Prediction only
+```
+
+The Signal Sufficiency Evaluator does not rewrite code. It diagnoses the executed evidence and returns actionable requirements to the Signal Code Generator. Keeping generation and evaluation separate makes the reason for each refinement traceable and reduces self-confirming code changes by the evaluator.
+
+### Train-Safe Sources
+
+The intended source set is:
+
+```text
+bi_train.txt
+ui_full.txt
+count.json
+item_info.json
+content_feature.pt
+description_feature.pt
+item_cf_feature.pt
+{dataset}_LightGCN_bi_feature.pt
+```
+
+`item_cf_feature.pt` is an item embedding trained from `ui_full.txt`. `{dataset}_LightGCN_bi_feature.pt` is an item embedding trained from `bi_train.txt`. This provenance is part of the source contract supplied by the user; generated code must still validate the serialized object type and item-index alignment before using either representation. No test ground truth, true label, hit, previous prediction, result file, `bi_full.txt`, or test-GT path may be exposed to any agent.
+
+BI/UI parsing retains the existing typed-ID rule:
+
+```text
+context_id = values[0]
+item_ids = values[1:]
+```
+
+Bundle IDs and user IDs are context IDs, not item IDs, even when their integer values happen to match an item ID.
+
+### Common Case Contract
+
+The evidence-discovery path receives an ID-centered case:
+
+```json
+{
+  "case_id": "bundle_418",
+  "dataset": "pog",
+  "task_semantics": "fashion bundle completion",
+  "bundle_id": 418,
+  "partial_item_ids": [154, 932],
+  "candidates": [
+    {"label": "A", "item_id": 281},
+    {"label": "B", "item_id": 719}
+  ]
+}
+```
+
+The Signal Code Generator and Signal Sufficiency Evaluator do not receive item text directly. Generated code may retrieve text and metadata from the allowed `item_info.json` source with explicit provenance. The final Decision Agent receives deterministic item text and metadata resolved from `item_info.json`, because semantic bundle compatibility cannot be judged reliably from IDs and numeric signals alone.
+
+### Stage 1: Signal Code Generator
+
+The Signal Code Generator receives:
+
+- the ID-centered case;
+- task semantics;
+- the Source Capability Manifest and real file contracts;
+- allowed relative source paths;
+- output-path, timeout, leakage, and candidate-coverage constraints;
+- on a refinement round only, the previous code, execution summary, evidence, and evaluator feedback.
+
+The agent returns executable Python code only. It must not choose, rank, recommend, or imply a preferred candidate. The code writes a compact Evidence JSON centered on observations for every exact candidate label.
+
+The minimal evidence contract is:
+
+```json
+{
+  "signals": [
+    {
+      "signal_name": "bundle_context_relation",
+      "description": "What factual relationship or quantity this signal measures",
+      "sources": ["bi_train.txt", "item_info.json"],
+      "candidate_observations": {
+        "A": {
+          "value": 0.42,
+          "evidence": ["compact representative fact or example"]
+        },
+        "B": {
+          "value": 0.18,
+          "evidence": ["compact representative fact or example"]
+        }
+      }
+    }
+  ]
+}
+```
+
+The required evidence elements are deliberately limited to:
+
+- `signal_name`: a stable signal identifier;
+- `description`: what was actually measured;
+- `sources`: factual provenance;
+- `candidate_observations`: values and compact representative evidence for every candidate A-J.
+
+Candidate observations are the central output. `value` may be `null` when an observation is factual or example-based rather than scalar. Representative evidence should be capped to a small number of items per candidate. Coverage, missing labels, execution success, and schema compliance should be computed by the runner rather than redundantly described by generated code. The evaluator can inspect the generated code, so the evidence does not need a verbose derivation narrative.
+
+### System Component: Python Executor and Deterministic Validation
+
+The executor is not an LLM agent. It runs the generated code inside the restricted allowed workspace and records success, runtime, stdout, stderr, output existence, and parse results.
+
+Before the sufficiency LLM is called, deterministic validation checks:
+
+- successful execution and valid JSON;
+- the required minimal evidence schema;
+- exact candidate-label coverage for all candidates;
+- allowed-source and leakage-policy compliance;
+- usable provenance fields.
+
+Execution or schema errors follow a code-repair path. They are not semantic sufficiency statuses.
+
+### Stage 2: Signal Sufficiency Evaluator
+
+The evaluator receives:
+
+- the ID-centered case and Source Capability Manifest;
+- generated code;
+- compact execution summary;
+- validated Evidence JSON;
+- current iteration and remaining refinement budget;
+- previous evaluation summaries when applicable.
+
+It evaluates candidate/source coverage, discrimination, ties and all-zero values, relevance to bundle compatibility, direct versus indirect grounding, redundancy, popularity or single-source dominance, conflicts, missingness, and confusion between similarity, compatibility, and redundancy.
+
+Its structured output is:
+
+```json
+{
+  "status": "REFINE",
+  "evidence_quality": "LOW",
+  "reliable_signals": [],
+  "weak_or_failed_signals": [],
+  "coverage_problems": [],
+  "redundancy_problems": [],
+  "conflicts": [],
+  "evidence_gaps": [],
+  "required_improvements": [],
+  "expected_new_information": "",
+  "reason": ""
+}
+```
+
+The status space is intentionally limited to:
+
+- `SUFFICIENT`: grounded evidence is adequate to pass to the Decision Agent;
+- `REFINE`: evidence is insufficient, but a concrete and feasible additional investigation could provide new decision-relevant information;
+- `INCONCLUSIVE`: evidence remains insufficient and another allowed refinement is unlikely to resolve the gap, or the refinement budget has been exhausted.
+
+`REFINE` must not mean merely that the evidence is weak. The evaluator must identify a resolvable evidence gap, state what new information is required, and explain how the possible result could change the evidence assessment. Its `required_improvements` describe information requirements, not replacement Python code or a fixed retrieval recipe.
+
+Conflicts, low evidence quality, and missing coverage remain fields rather than additional statuses. Execution errors remain outside this status space.
+
+### Refinement Loop
+
+On `REFINE`, the original Signal Code Generator receives the previous code, executed evidence, execution summary, and evaluator feedback. It may revise or replace the code while remaining within the same source and leakage constraints.
+
+The configuration now includes:
+
+```yaml
+simple_signal_max_refinement_rounds: 1
+```
+
+This value counts additional Generate -> Execute -> Evaluate rounds after the initial round. The default therefore allows at most two successful signal-code executions per sample: one initial execution and one refinement execution. If the budget is exhausted while evidence remains insufficient, the method proceeds to the Decision Agent with the unresolved gaps and low-quality or inconclusive status explicitly attached.
+
+### Stage 3: Decision Agent
+
+The Decision Agent receives:
+
+- task semantics and the case identifiers;
+- partial items and candidates with deterministic text and metadata resolved from `item_info.json`;
+- the final validated Evidence JSON;
+- the final sufficiency evaluation;
+- a compact refinement-history summary if a refinement occurred.
+
+The Decision Agent is the only component allowed to select a candidate. It should account for evidence quality, unresolved conflicts, sparse data, downweighted signals, and semantic item compatibility. Evidence discovery remains ID-centered, while final decision-making uses IDs, item text, and verified evidence.
+
+The output contract contains only the prediction:
+
+```json
+{
+  "prediction": "A"
+}
+```
+
+Reasoning, confidence, candidate trade-offs, and post-hoc explanations are intentionally omitted. The evaluation target is candidate accuracy, and the saved upstream evidence and evaluator trace already provide the method-level diagnostic record. The runner may still store the raw prediction response, parsed label, and system-computed hit for reproducibility and error analysis.
+
+### 2026-06-23 Initial Implementation
+
+The first implementation is under `src/simple_signal_agent/`:
+
+```text
+src/simple_signal_agent/prompts.py
+src/simple_signal_agent/pipeline.py
+src/simple_signal_agent/__init__.py
+```
+
+`src/main.py` now selects the runner through:
+
+```yaml
+method: simple_generate_evaluate_decide  # progressive_signal_discovery | simple_generate_evaluate_decide
+```
+
+The simple method uses separate code, evaluator, and prediction clients and token budgets. Its workspace, timeout, guard, repair, evidence-size, refinement, current-bundle policy, and allowed-file settings use the `simple_signal_` configuration prefix. The default configuration exposes both interaction-derived item embeddings after resolving `{dataset}` in the BI embedding filename.
+
+The generated-code runner reuses the existing restricted workspace and code guard, extended to accept a method-specific configuration prefix. Deterministic validation enforces the minimal evidence schema, exact A-J coverage within every signal, exact available-source provenance, at most three evidence entries per candidate per signal, the configured evidence-size limit, and the absence of decision fields such as prediction, winner, ranking, recommendation, or final score.
+
+Each successful round is evaluated once. `REFINE` is accepted only when the evaluator provides a non-empty evidence gap, required improvement, and expected new information while refinement budget remains. Otherwise it is normalized to `INCONCLUSIVE`. A refinement output is a complete replacement evidence pack. If a refinement execution fails after code repair, the last valid evidence is retained and passed to decision with an inconclusive evaluation.
+
+Result rows use the `simple_signal_` prefix and store the workspace files, manifest, ID-only case, deterministic decision case, complete round trace, final evidence, final evaluation, final status/quality, and raw/parsed prediction response. The public `prediction`, `raw_response`, and `hit` columns remain compatible with existing evaluation and resume behavior. Result filenames include the selected method name.
+
+Offline tests in `tests/test_simple_signal_agent.py` cover minimal evidence validation, refinement-budget normalization, and an end-to-end fake-LLM flow through code generation, execution, evaluation, and prediction. The existing Progressive Signal Discovery smoke test remains passing after the shared workspace changes.

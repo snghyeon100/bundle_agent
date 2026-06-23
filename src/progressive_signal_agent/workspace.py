@@ -68,7 +68,35 @@ SOURCE_CONTRACTS = {
         "relations": ["item has description representation"],
         "format": "torch tensor indexed by integer item_id when dimensions match item count",
     },
+    "item_cf_feature.pt": {
+        "entities": ["item", "feature vector"],
+        "relations": ["item has UI-LightGCN representation"],
+        "format": "PyTorch item embedding derived from ui_full.txt; validate object type and item-axis alignment",
+    },
 }
+
+
+def _source_contract(filename):
+    if filename.endswith("_LightGCN_bi_feature.pt"):
+        return {
+            "entities": ["item", "feature vector"],
+            "relations": ["item has BI-LightGCN representation"],
+            "format": (
+                "PyTorch item embedding derived from bi_train.txt; validate object type and item-axis alignment"
+            ),
+        }
+    return SOURCE_CONTRACTS.get(filename, {})
+
+
+def _method_setting(conf, prefix, name, default):
+    key = f"{prefix}_{name}"
+    if key in conf:
+        return conf[key]
+    if prefix != "psd":
+        legacy_key = f"psd_{name}"
+        if legacy_key in conf:
+            return conf[legacy_key]
+    return default
 
 
 def _copy_if_needed(source, destination):
@@ -84,9 +112,11 @@ def _copy_if_needed(source, destination):
     return True
 
 
-def prepare_workspace(conf):
+def prepare_workspace(conf, config_prefix="psd"):
     data_root = os.path.abspath(os.path.join(conf["data_path"], conf["dataset"]))
-    workspace_root = os.path.abspath(conf.get("psd_workspace_root", "./agent_workspaces"))
+    workspace_root = os.path.abspath(
+        _method_setting(conf, config_prefix, "workspace_root", "./agent_workspaces")
+    )
     workspace_dir = os.path.join(workspace_root, conf["dataset"])
     data_dir = os.path.join(workspace_dir, "data")
     output_dir = os.path.join(workspace_dir, "output")
@@ -95,7 +125,14 @@ def prepare_workspace(conf):
 
     available = []
     copied = []
-    for filename in conf.get("psd_allowed_files", DEFAULT_ALLOWED_FILES):
+    configured_files = _method_setting(
+        conf,
+        config_prefix,
+        "allowed_files",
+        DEFAULT_ALLOWED_FILES,
+    )
+    for configured_filename in configured_files:
+        filename = str(configured_filename).replace("{dataset}", str(conf["dataset"]))
         source = os.path.join(data_root, filename)
         if not os.path.isfile(source):
             continue
@@ -116,7 +153,7 @@ def prepare_workspace(conf):
 def build_source_manifest(workspace, current_bundle_policy):
     sources = []
     for entry in workspace["files"]:
-        contract = SOURCE_CONTRACTS.get(entry["name"], {})
+        contract = _source_contract(entry["name"])
         sources.append(
             {
                 "name": entry["name"],
@@ -153,15 +190,27 @@ def build_source_manifest(workspace, current_bundle_policy):
     }
 
 
-def guard_generated_code(code, conf):
-    if not bool(conf.get("psd_enable_code_guard", True)):
+def guard_generated_code(code, conf, config_prefix="psd"):
+    if not bool(_method_setting(conf, config_prefix, "enable_code_guard", True)):
         return []
-    patterns = conf.get("psd_forbidden_code_patterns") or DEFAULT_FORBIDDEN_CODE_PATTERNS
+    patterns = _method_setting(
+        conf,
+        config_prefix,
+        "forbidden_code_patterns",
+        DEFAULT_FORBIDDEN_CODE_PATTERNS,
+    )
     return [pattern for pattern in patterns if re.search(pattern, code, flags=re.IGNORECASE)]
 
 
-def execute_generated_code(code, conf, workspace, output_file, script_name):
-    violations = guard_generated_code(code, conf)
+def execute_generated_code(
+    code,
+    conf,
+    workspace,
+    output_file,
+    script_name,
+    config_prefix="psd",
+):
+    violations = guard_generated_code(code, conf, config_prefix=config_prefix)
     if violations:
         return {
             "returncode": None,
@@ -184,7 +233,7 @@ def execute_generated_code(code, conf, workspace, output_file, script_name):
 
     env = os.environ.copy()
     env["PYTHONIOENCODING"] = "utf-8"
-    timeout = int(conf.get("psd_code_timeout_seconds", 45))
+    timeout = int(_method_setting(conf, config_prefix, "code_timeout_seconds", 45))
     try:
         completed = subprocess.run(
             [sys.executable, script_path],
@@ -196,8 +245,12 @@ def execute_generated_code(code, conf, workspace, output_file, script_name):
             timeout=timeout,
             env=env,
         )
-        stdout = completed.stdout[-int(conf.get("psd_code_max_stdout_chars", 24000)) :]
-        stderr = completed.stderr[-int(conf.get("psd_code_max_stderr_chars", 10000)) :]
+        stdout = completed.stdout[
+            -int(_method_setting(conf, config_prefix, "code_max_stdout_chars", 24000)) :
+        ]
+        stderr = completed.stderr[
+            -int(_method_setting(conf, config_prefix, "code_max_stderr_chars", 10000)) :
+        ]
         returncode = completed.returncode
         timed_out = False
     except subprocess.TimeoutExpired as exc:

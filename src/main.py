@@ -13,10 +13,32 @@ from google import genai
 from dataset import BundleZeroShotDataset, set_seed
 from progressive_signal_agent import run_progressive_signal_agent
 from progressive_signal_agent.common import compact_json
+from simple_signal_agent import run_simple_signal_agent
 
 
 class QuotaExceededError(RuntimeError):
     pass
+
+
+PSD_METHOD = "progressive_signal_discovery"
+SIMPLE_SIGNAL_METHOD = "simple_generate_evaluate_decide"
+
+
+def selected_method(conf):
+    value = str(conf.get("method", PSD_METHOD)).strip().lower().replace("-", "_")
+    aliases = {
+        "psd": PSD_METHOD,
+        PSD_METHOD: PSD_METHOD,
+        "simple_signal": SIMPLE_SIGNAL_METHOD,
+        "simple_signal_agent": SIMPLE_SIGNAL_METHOD,
+        "generate_evaluate_decide": SIMPLE_SIGNAL_METHOD,
+        SIMPLE_SIGNAL_METHOD: SIMPLE_SIGNAL_METHOD,
+    }
+    if value not in aliases:
+        raise ValueError(
+            f"Unsupported method: {value}. Choose {PSD_METHOD} or {SIMPLE_SIGNAL_METHOD}."
+        )
+    return aliases[value]
 
 
 load_dotenv(
@@ -140,8 +162,9 @@ def result_path(conf, timestamp, partial=False):
     directory = os.path.join(conf["output_dir"], conf["dataset"])
     os.makedirs(directory, exist_ok=True)
     suffix = "_partial" if partial else ""
+    method = selected_method(conf)
     filename = (
-        f"results_{conf['dataset']}_progressive_signal_discovery_"
+        f"results_{conf['dataset']}_{method}_"
         f"C{conf.get('num_cans', '')}_T{conf.get('num_token', '')}_{timestamp}{suffix}.csv"
     )
     return os.path.join(directory, filename)
@@ -160,6 +183,7 @@ def save_results(results, conf, timestamp, partial=False):
         frame["overall_valid_ratio"] = valid_ratio
         frame["valid_only_hit_rate"] = valid_hit_rate
         config_fields = [
+            "method",
             "dataset",
             "num_cans",
             "num_token",
@@ -179,10 +203,22 @@ def save_results(results, conf, timestamp, partial=False):
             "psd_current_bundle_train_context_policy",
             "psd_code_timeout_seconds",
             "psd_enable_code_guard",
+            "simple_signal_code_max_output_tokens",
+            "simple_signal_evaluation_max_output_tokens",
+            "simple_signal_prediction_max_output_tokens",
+            "simple_signal_max_refinement_rounds",
+            "simple_signal_code_max_repair_attempts",
+            "simple_signal_max_evidence_chars",
+            "simple_signal_current_bundle_train_context_policy",
+            "simple_signal_code_timeout_seconds",
+            "simple_signal_enable_code_guard",
         ]
         for field in config_fields:
             frame[f"cfg_{field}"] = conf.get(field, "")
         frame["cfg_psd_allowed_files"] = compact_json(conf.get("psd_allowed_files", []))
+        frame["cfg_simple_signal_allowed_files"] = compact_json(
+            conf.get("simple_signal_allowed_files", [])
+        )
         frame["cfg_max_retries"] = conf.get("max_retries", "")
         frame["cfg_retry_wait_seconds"] = conf.get("retry_wait_seconds", "")
 
@@ -191,7 +227,15 @@ def save_results(results, conf, timestamp, partial=False):
     return path, frame, hit_rate, valid_ratio, valid_hit_rate, int(valid_mask.sum()) if not frame.empty else 0
 
 
-async def process_samples(clients, samples, conf, timestamp, initial_results=None, start_idx=0):
+async def process_samples(
+    clients,
+    samples,
+    conf,
+    timestamp,
+    method,
+    initial_results=None,
+    start_idx=0,
+):
     results = list(initial_results or [])
     concurrency = int(conf.get("max_concurrent", 1))
     semaphore = asyncio.Semaphore(concurrency)
@@ -201,7 +245,12 @@ async def process_samples(clients, samples, conf, timestamp, initial_results=Non
         row = dict(sample)
         async with semaphore:
             try:
-                updates, prediction, raw_response = await run_progressive_signal_agent(
+                runner = (
+                    run_simple_signal_agent
+                    if method == SIMPLE_SIGNAL_METHOD
+                    else run_progressive_signal_agent
+                )
+                updates, prediction, raw_response = await runner(
                     sample,
                     conf,
                     clients,
@@ -242,17 +291,25 @@ def load_resume(path):
         return pd.read_csv(path, encoding="cp949")
 
 
-def _build_clients(conf):
+def _build_clients(conf, method):
     fallback = default_api_key_envs(conf)
     clients = {}
     resolved_envs = {}
     prior_envs = []
-    for role, key in (
-        ("planning", "psd_planning_api_key_env"),
-        ("code", "psd_code_api_key_env"),
-        ("diagnosis", "psd_diagnosis_api_key_env"),
-        ("prediction", "psd_prediction_api_key_env"),
-    ):
+    if method == SIMPLE_SIGNAL_METHOD:
+        role_keys = (
+            ("code", "simple_signal_code_api_key_env"),
+            ("evaluator", "simple_signal_evaluator_api_key_env"),
+            ("prediction", "simple_signal_prediction_api_key_env"),
+        )
+    else:
+        role_keys = (
+            ("planning", "psd_planning_api_key_env"),
+            ("code", "psd_code_api_key_env"),
+            ("diagnosis", "psd_diagnosis_api_key_env"),
+            ("prediction", "psd_prediction_api_key_env"),
+        )
+    for role, key in role_keys:
         api_key, env_name = resolve_api_key(conf, key, prior_envs + fallback)
         clients[role] = create_llm_client(conf, api_key)
         resolved_envs[role] = env_name
@@ -261,7 +318,7 @@ def _build_clients(conf):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run Progressive Signal Discovery bundle evaluation")
+    parser = argparse.ArgumentParser(description="Run source-grounded bundle evaluation")
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument("--start_idx", type=int, default=0)
     parser.add_argument("--resume", default="")
@@ -269,6 +326,11 @@ def main():
 
     with open(args.config, "r", encoding="utf-8") as handle:
         conf = yaml.safe_load(handle)
+    try:
+        method = selected_method(conf)
+    except ValueError as exc:
+        print(f"[Error] {exc}")
+        return 1
     os.makedirs(conf["output_dir"], exist_ok=True)
     set_seed(int(conf.get("seed", 45)))
 
@@ -286,12 +348,12 @@ def main():
         samples = samples[args.start_idx :]
 
     print(f">>> Config: {args.config}")
-    print(f">>> Method: Progressive Signal Discovery")
+    print(f">>> Method: {method}")
     print(f">>> Dataset: {conf['dataset']}")
     print(f">>> Samples: {len(samples)} (start_idx={args.start_idx})")
 
     try:
-        clients, resolved_envs = _build_clients(conf)
+        clients, resolved_envs = _build_clients(conf, method)
     except ValueError as exc:
         print(f"[Error] {exc}")
         return 1
@@ -306,6 +368,7 @@ def main():
                 samples,
                 conf,
                 timestamp,
+                method,
                 initial_results=initial_results,
                 start_idx=args.start_idx,
             )

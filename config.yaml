@@ -2,6 +2,9 @@
 dataset: pog                   # pog | pog_dense | spotify | spotify_sparse
 data_path: ./datasets
 
+# Method
+method: simple_generate_evaluate_decide  # progressive_signal_discovery | simple_generate_evaluate_decide
+
 # Evaluation
 num_cans: 10                  # candidates including the answer
 num_token: 5                  # max partial-bundle items (-1 = no limit)
@@ -23,17 +26,32 @@ psd_code_api_key_env: "GEMINI_API_KEY_2"
 psd_diagnosis_api_key_env: "GEMINI_API_KEY_3"
 psd_prediction_api_key_env: "GEMINI_API_KEY_4"
 
+# Simple Generate-Evaluate-Decide stage clients
+simple_signal_code_api_key_env: "GEMINI_API_KEY_2"
+simple_signal_evaluator_api_key_env: "GEMINI_API_KEY_3"
+simple_signal_prediction_api_key_env: "GEMINI_API_KEY_4"
+
 # Stage generation budgets
 psd_broad_planning_max_output_tokens: 1600
 psd_code_max_output_tokens: 4000
 psd_diagnosis_max_output_tokens: 1800
 psd_deep_planning_max_output_tokens: 2400
 psd_prediction_max_output_tokens: 1200
+simple_signal_code_max_output_tokens: 4000
+simple_signal_evaluation_max_output_tokens: 1800
+simple_signal_prediction_max_output_tokens: 200
 
 # Adaptive discovery loop
 psd_max_deep_rounds: 1
 psd_code_max_repair_attempts: 1
 psd_current_bundle_train_context_policy: allow  # allow | exclude
+
+# Simple signal-generation refinement
+# Number of additional Generate -> Evaluate refinement rounds after the initial run.
+simple_signal_max_refinement_rounds: 1
+simple_signal_code_max_repair_attempts: 1
+simple_signal_max_evidence_chars: 30000
+simple_signal_current_bundle_train_context_policy: allow  # allow | exclude
 
 # Generated-code workspace and safety
 psd_workspace_root: ./agent_workspaces
@@ -48,6 +66,21 @@ psd_allowed_files:
   - ui_full.txt
   - content_feature.pt
   - description_feature.pt
+
+simple_signal_workspace_root: ./agent_workspaces
+simple_signal_code_timeout_seconds: 45
+simple_signal_code_max_stdout_chars: 24000
+simple_signal_code_max_stderr_chars: 10000
+simple_signal_enable_code_guard: true
+simple_signal_allowed_files:
+  - count.json
+  - item_info.json
+  - bi_train.txt
+  - ui_full.txt
+  - content_feature.pt
+  - description_feature.pt
+  - item_cf_feature.pt
+  - "{dataset}_LightGCN_bi_feature.pt"
 
 # Retry and execution
 max_retries: 5
