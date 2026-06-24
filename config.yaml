@@ -8,15 +8,15 @@ method: simple_generate_evaluate_decide  # progressive_signal_discovery | simple
 # Evaluation
 num_cans: 10                  # candidates including the answer
 num_token: 5                  # max partial-bundle items (-1 = no limit)
-toy_eval: 250                 # -1 = full test set | N = first N samples
+toy_eval: 1                 # -1 = full test set | N = first N samples
 seed: 45                      # negative-candidate sampling seed
 shuffle_seed: 41              # partial-item order seed
 
 # LLM
-llm_provider: gemini          # gemini | openai
-model: gemini-3.1-flash-lite
+llm_provider: openai          # gemini | openai
+model: gpt-4.1
 temperature: 0.0
-openai_send_temperature: false
+openai_send_temperature: true
 openai_reasoning_effort: ""   # minimal | low | medium | high
 
 # Progressive Signal Discovery stage clients
@@ -27,9 +27,8 @@ psd_diagnosis_api_key_env: "GEMINI_API_KEY_3"
 psd_prediction_api_key_env: "GEMINI_API_KEY_4"
 
 # Simple Generate-Evaluate-Decide stage clients
-simple_signal_code_api_key_env: "GEMINI_API_KEY_2"
-simple_signal_evaluator_api_key_env: "GEMINI_API_KEY_3"
-simple_signal_prediction_api_key_env: "GEMINI_API_KEY_4"
+simple_signal_code_api_key_env: "OPENAI_API_KEY"
+simple_signal_prediction_api_key_env: "OPENAI_API_KEY"
 
 # Stage generation budgets
 psd_broad_planning_max_output_tokens: 1600
@@ -38,7 +37,6 @@ psd_diagnosis_max_output_tokens: 1800
 psd_deep_planning_max_output_tokens: 2400
 psd_prediction_max_output_tokens: 1200
 simple_signal_code_max_output_tokens: 4000
-simple_signal_evaluation_max_output_tokens: 1800
 simple_signal_prediction_max_output_tokens: 200
 
 # Adaptive discovery loop
@@ -47,7 +45,7 @@ psd_code_max_repair_attempts: 1
 psd_current_bundle_train_context_policy: allow  # allow | exclude
 
 # Simple signal-generation refinement
-# Number of additional Generate -> Evaluate refinement rounds after the initial run.
+# Number of graph-guided multi-hop rounds after the initial broad signal scan.
 simple_signal_max_refinement_rounds: 1
 simple_signal_code_max_repair_attempts: 1
 simple_signal_max_evidence_chars: 30000

@@ -25,3 +25,4 @@ analysis/**
 .idea/
 .DS_Store
 Thumbs.db
+.codex_tmp/**

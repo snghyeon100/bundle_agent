@@ -1,9 +1,9 @@
 """Manual live-API runner for Simple Signal Stages 1 and 2.
 
-The runner performs signal generation/execution, sufficiency evaluation, and
-configured refinement rounds. It intentionally stops before the Stage 3
-Decision Agent. The ``run_...`` filename keeps paid API calls out of unittest
-discovery.
+The runner performs Stage 1 broad signal generation and configured Stage 2
+graph-guided multi-hop rounds with rule-based validation. It intentionally
+stops before the final Decision Agent. The ``run_...`` filename keeps paid API
+calls out of unittest discovery.
 """
 
 import argparse
@@ -33,18 +33,15 @@ from main import (
 from progressive_signal_agent.common import (
     build_case_view,
     candidate_labels,
-    parse_json_from_text,
 )
 from progressive_signal_agent.workspace import build_source_manifest, prepare_workspace
 from simple_signal_agent.pipeline import (
     CONFIG_PREFIX,
-    _evaluation_fallback,
     _generate_execute_repair,
-    merge_reliable_evidence,
-    normalize_evaluation,
+    merge_signal_evidence,
 )
 from simple_signal_agent.affordance_graph import build_evidence_affordance_graph
-from simple_signal_agent.prompts import signal_code_prompt, sufficiency_evaluation_prompt
+from simple_signal_agent.prompts import signal_code_prompt
 
 
 def print_prompt_debug(title, prompt):
@@ -56,8 +53,8 @@ def print_prompt_debug(title, prompt):
 def parse_args():
     parser = argparse.ArgumentParser(
         description=(
-            "Run Simple Signal Stage 1, Stage 2 sufficiency evaluation, and any "
-            "configured refinement rounds without calling the Decision Agent."
+            "Run the Simple Signal Stage 1 broad scan and graph-guided Stage 2 "
+            "multi-hop rounds without calling the Decision Agent."
         )
     )
     parser.add_argument("--config", default="config.yaml")
@@ -81,10 +78,8 @@ async def run_stages_1_and_2(sample, conf, clients, debug_callback=None):
     max_evidence_chars = int(conf.get("simple_signal_max_evidence_chars", 30000))
 
     round_trace = []
-    evaluation_history = []
     refinement_context = None
-    final_evidence = None
-    final_evaluation = _evaluation_fallback("No signal round completed.")
+    final_evidence = {"signals": []}
 
     for round_index in range(max_refinements + 1):
         round_number = round_index + 1
@@ -114,83 +109,33 @@ async def run_stages_1_and_2(sample, conf, clients, debug_callback=None):
             workspace=workspace,
             output_file=output_file,
             labels=labels,
+            affordance_graph=affordance_graph,
         )
         evidence = code_result["accepted_evidence"]
-        evidence_for_evaluation = None
-        remaining_refinements = max_refinements - round_index
-        evaluation_prompt = ""
-        evaluation_raw = ""
-
-        if evidence is None:
-            detail = "; ".join(code_result["validation_issues"])
-            final_evaluation = _evaluation_fallback(
-                "Signal code did not produce valid evidence after the configured repair attempts. "
-                + detail
-            )
-        else:
-            evidence_for_evaluation = merge_reliable_evidence(
-                final_evidence,
-                final_evaluation,
-                evidence,
-            )
-            evaluation_prompt = sufficiency_evaluation_prompt(
-                case_view,
-                source_manifest,
-                affordance_graph,
-                code_result["generated_code"],
-                code_result["execution_summary"],
-                evidence_for_evaluation,
-                round_index,
-                remaining_refinements,
-                evaluation_history,
-            )
-            if debug_callback:
-                debug_callback(
-                    f"Simple Signal Sufficiency Evaluation Prompt {round_number}",
-                    evaluation_prompt,
-                )
-            evaluation_raw = await generate_content_with_retry(
-                clients["evaluator"],
-                conf["model"],
-                evaluation_prompt,
-                conf,
-                conf.get("simple_signal_evaluation_max_output_tokens", 1800),
-                f"simple signal sufficiency evaluation round {round_number}",
-            )
-            final_evaluation = normalize_evaluation(
-                parse_json_from_text(evaluation_raw),
-                remaining_refinements,
-            )
-            final_evidence = evidence_for_evaluation
+        if evidence is not None:
+            final_evidence = merge_signal_evidence(final_evidence, evidence)
 
         round_trace.append(
             {
                 "round": round_number,
                 "is_refinement": round_index > 0,
+                "round_role": "primitive_signal_scan" if round_index == 0 else "multi_hop_refinement",
                 "code_prompt": code_prompt,
                 "code_raw_response": code_result["raw_response"],
                 "generated_code": code_result["generated_code"],
                 "code_repairs": code_result["repairs"],
                 "execution_summary": code_result["execution_summary"],
                 "validation_issues": code_result["validation_issues"],
+                "rule_validation_passed": evidence is not None,
                 "accepted_evidence": evidence,
-                "evidence_for_evaluation": evidence_for_evaluation,
-                "evaluation_prompt": evaluation_prompt,
-                "evaluation_raw_response": evaluation_raw,
-                "evaluation": final_evaluation,
+                "merged_evidence_after_round": final_evidence,
             }
         )
 
-        if evidence is None or final_evaluation["status"] != "REFINE":
+        if evidence is None:
             break
 
-        evaluation_history.append(final_evaluation)
-        refinement_context = {
-            "previous_code": code_result["generated_code"],
-            "previous_evidence": final_evidence,
-            "execution_summary": code_result["execution_summary"],
-            "evaluator_feedback": final_evaluation,
-        }
+        refinement_context = final_evidence
 
     return {
         "method": "simple_generate_evaluate_decide_stages1_2_refine",
@@ -205,7 +150,7 @@ async def run_stages_1_and_2(sample, conf, clients, debug_callback=None):
         "refinement_count": max(0, len(round_trace) - 1),
         "round_trace": round_trace,
         "final_evidence": final_evidence,
-        "final_evaluation": final_evaluation,
+        "rule_validation_passed": bool(final_evidence.get("signals")),
     }
 
 
@@ -230,20 +175,13 @@ async def run(args):
         "simple_signal_code_api_key_env",
         fallback_envs,
     )
-    evaluator_api_key, evaluator_api_key_env = resolve_api_key(
-        conf,
-        "simple_signal_evaluator_api_key_env",
-        [code_api_key_env, *fallback_envs],
-    )
     clients = {
         "code": create_llm_client(conf, code_api_key),
-        "evaluator": create_llm_client(conf, evaluator_api_key),
     }
 
     print(f">>> Provider: {llm_provider(conf)}")
     print(f">>> Model: {conf['model']}")
     print(f">>> Code API key env: {code_api_key_env}")
-    print(f">>> Evaluator API key env: {evaluator_api_key_env}")
     print(f">>> Dataset: {conf['dataset']}")
     print(f">>> Samples: {len(selected)} (start={start})")
     print(
@@ -267,20 +205,13 @@ async def run(args):
         records.append({"sample_idx": sample_index, **result})
 
         for trace in result["round_trace"]:
-            evaluation = trace["evaluation"]
             print(
                 f">>> Round {trace['round']}: "
                 f"evidence_accepted={isinstance(trace['accepted_evidence'], dict)}, "
                 f"repairs={len(trace['code_repairs'])}, "
-                f"status={evaluation['status']}, "
-                f"quality={evaluation['evidence_quality']}"
+                f"rule_validation_passed={trace['rule_validation_passed']}"
             )
-        print(
-            ">>> Final evaluation:\n"
-            + console_safe_text(
-                json.dumps(result["final_evaluation"], ensure_ascii=False, indent=2)
-            )
-        )
+        print(">>> Final merged evidence signals: " + str(len(result["final_evidence"]["signals"])))
 
     if args.output:
         output_path = os.path.abspath(args.output)
@@ -300,7 +231,6 @@ async def run(args):
         "llm_provider": llm_provider(conf),
         "api_key_envs": {
             "code": code_api_key_env,
-            "evaluator": evaluator_api_key_env,
         },
         "records": records,
     }

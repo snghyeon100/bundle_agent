@@ -1,0 +1,60 @@
+# ============================================================
+# config_sem.yaml — sem_agent (Semantic Compatibility Profiling)
+# ============================================================
+
+# Dataset
+dataset: pog                   # pog | pog_dense | spotify | spotify_sparse
+data_path: ./datasets
+
+# Evaluation
+num_cans: 10                   # number of candidates (including answer)
+num_token: 5                   # max partial-bundle items (-1 = no limit)
+toy_eval: 1                    # -1 = full test set | N = first N samples
+seed: 45
+shuffle_seed: 41
+
+# LLM
+llm_provider: openai           # gemini | openai
+model: gpt-4.1
+temperature: 0.0
+openai_send_temperature: true
+openai_reasoning_effort: ""    # minimal | low | medium | high
+
+# sem_agent stage clients
+# Code client: Stage 1 (Ecosystem Profile) + Stage 2 (Gap + Cross-val)
+# Prediction client: final Reasoning Decision (lighter model is fine)
+sem_code_api_key_env: "OPENAI_API_KEY"
+sem_prediction_api_key_env: "OPENAI_API_KEY"
+
+# Token budgets
+sem_code_max_output_tokens: 4000
+sem_prediction_max_output_tokens: 200
+
+# Repair and evidence settings
+sem_code_max_repair_attempts: 2
+sem_max_evidence_chars: 20000
+
+# Train context policy
+sem_current_bundle_train_context_policy: allow  # allow | exclude
+
+# Workspace and code safety
+sem_workspace_root: ./agent_workspaces
+sem_code_timeout_seconds: 60
+sem_code_max_stdout_chars: 24000
+sem_code_max_stderr_chars: 10000
+sem_enable_code_guard: true
+sem_allowed_files:
+  - count.json
+  - item_info.json
+  - bi_train.txt
+  - ui_full.txt
+  - content_feature.pt
+  - description_feature.pt
+  - item_cf_feature.pt
+  - "{dataset}_LightGCN_bi_feature.pt"
+
+# Retry and concurrency
+max_retries: 5
+retry_wait_seconds: 30
+max_concurrent: 1
+output_dir: ./results

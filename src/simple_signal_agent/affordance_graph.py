@@ -17,6 +17,49 @@ RELATION_COMPOSITION_NOTE = (
 )
 
 
+def render_affordance_relation_map(graph):
+    """Render the machine-readable graph as a compact LLM navigation view."""
+    if not isinstance(graph, dict):
+        return "(no affordance relations available)"
+
+    entity_names = []
+    for entry in graph.get("entity_types", []):
+        if isinstance(entry, dict) and str(entry.get("entity", "")).strip():
+            entity_names.append(str(entry["entity"]).strip())
+
+    lines = ["ENTITY TYPES: " + ", ".join(entity_names)] if entity_names else []
+    lines.append("AVAILABLE TYPED RELATIONS AND RETRIEVAL VIEWS:")
+
+    for source in graph.get("source_affordances", []):
+        if not isinstance(source, dict):
+            continue
+        name = str(source.get("source", "unknown_source"))
+        connects = " <-> ".join(str(value) for value in source.get("connects", []) if str(value))
+        relations = "; ".join(
+            str(value) for value in source.get("recorded_relations", []) if str(value)
+        ) or "representation or source-defined relation"
+        kind = str(source.get("kind", "source_contract"))
+        grounding = str(source.get("grounding", "source-defined grounding"))
+        line = f"- {name}: {relations} | connects {connects or 'typed entities'} | {kind} | {grounding}"
+        derived_from = [str(value) for value in source.get("derived_from", []) if str(value)]
+        if derived_from:
+            line += " | derived_from=" + ",".join(derived_from)
+        semantics = str(source.get("representation_semantics", "")).strip()
+        if semantics:
+            line += f" | view={semantics}"
+        lines.append(line)
+
+    lines.extend(
+        [
+            "COMPOSITION: invert typed relations when valid; join through shared entity types; use representations to "
+            "retrieve anchors, then continue into observed bundle, user, category, or attribute context.",
+            "DEPENDENCY: relations derived from the same recorded source are one evidence family, not independent support.",
+            "SEMANTICS: representation similarity is a retrieval bridge, not compatibility evidence by itself.",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def _source_affordance(source):
     name = str(source.get("name", ""))
     base = {

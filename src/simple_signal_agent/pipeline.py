@@ -22,8 +22,8 @@ from .affordance_graph import build_evidence_affordance_graph
 from .prompts import (
     code_repair_prompt,
     decision_prompt,
-    signal_code_prompt,
-    sufficiency_evaluation_prompt,
+    stage1_code_prompt,
+    stage2_code_prompt,
 )
 
 
@@ -72,7 +72,13 @@ def _forbidden_decision_keys(value, path=""):
     return issues
 
 
-def validate_signal_evidence(evidence, labels, allowed_source_names, max_evidence_chars=30000):
+def validate_signal_evidence(
+    evidence,
+    labels,
+    allowed_source_names,
+    max_evidence_chars=30000,
+    require_multi_hop=False,
+):
     if not isinstance(evidence, dict):
         return ["Evidence must be a JSON object."]
 
@@ -96,7 +102,13 @@ def validate_signal_evidence(evidence, labels, allowed_source_names, max_evidenc
         if not isinstance(signal, dict):
             issues.append(f"{prefix} must be an object.")
             continue
-        expected_fields = {"signal_name", "description", "sources", "candidate_observations"}
+        expected_fields = {
+            "signal_name",
+            "description",
+            "sources",
+            "relation_path",
+            "candidate_observations",
+        }
         extra_fields = sorted(set(signal) - expected_fields)
         if extra_fields:
             issues.append(f"{prefix} has unsupported fields: {', '.join(extra_fields)}.")
@@ -110,6 +122,19 @@ def validate_signal_evidence(evidence, labels, allowed_source_names, max_evidenc
 
         if not str(signal.get("description", "")).strip():
             issues.append(f"{prefix}.description must be non-empty.")
+
+        relation_path = signal.get("relation_path")
+        if relation_path is not None and (
+            not isinstance(relation_path, list)
+            or any(not str(transition).strip() for transition in relation_path)
+        ):
+            issues.append(f"{prefix}.relation_path must be a list of non-empty typed transitions.")
+        if require_multi_hop and (
+            not isinstance(relation_path, list) or len(relation_path) < 2
+        ):
+            issues.append(
+                f"{prefix}.relation_path must contain at least two transitions in a Stage 2 refinement."
+            )
 
         sources = signal.get("sources")
         if not isinstance(sources, list) or not sources:
@@ -162,111 +187,22 @@ def validate_signal_evidence(evidence, labels, allowed_source_names, max_evidenc
     return issues
 
 
-def _evaluation_fallback(reason, evidence_quality="NONE"):
-    return {
-        "status": "INCONCLUSIVE",
-        "evidence_quality": evidence_quality,
-        "reliable_signals": [],
-        "weak_or_failed_signals": [],
-        "coverage_problems": [],
-        "redundancy_problems": [],
-        "conflicts": [],
-        "evidence_gaps": [],
-        "required_improvements": [],
-        "expected_new_information": "",
-        "reason": str(reason or "")[:2000],
-    }
-
-
-def normalize_evaluation(value, remaining_refinement_rounds):
-    if not isinstance(value, dict):
-        return _evaluation_fallback("The evaluator did not return a JSON object.")
-
-    status = str(value.get("status", "")).strip().upper()
-    if status not in {"SUFFICIENT", "REFINE", "INCONCLUSIVE"}:
-        return _evaluation_fallback(f"The evaluator returned an invalid status: {status or '(empty)' }.")
-
-    quality = str(value.get("evidence_quality", "NONE")).strip().upper()
-    if quality not in {"NONE", "LOW", "MEDIUM", "HIGH"}:
-        quality = "NONE"
-
-    normalized = {
-        "status": status,
-        "evidence_quality": quality,
-        "reliable_signals": value.get("reliable_signals", []),
-        "weak_or_failed_signals": value.get("weak_or_failed_signals", []),
-        "coverage_problems": value.get("coverage_problems", []),
-        "redundancy_problems": value.get("redundancy_problems", []),
-        "conflicts": value.get("conflicts", []),
-        "evidence_gaps": value.get("evidence_gaps", []),
-        "required_improvements": value.get("required_improvements", []),
-        "expected_new_information": str(value.get("expected_new_information", "")).strip(),
-        "reason": str(value.get("reason", "")).strip(),
-    }
-    list_fields = (
-        "reliable_signals",
-        "weak_or_failed_signals",
-        "coverage_problems",
-        "redundancy_problems",
-        "conflicts",
-        "evidence_gaps",
-        "required_improvements",
-    )
-    for field in list_fields:
-        if not isinstance(normalized[field], list):
-            normalized[field] = [str(normalized[field])]
-
-    if status == "REFINE":
-        has_actionable_gap = bool(normalized["evidence_gaps"])
-        has_requirement = bool(normalized["required_improvements"])
-        has_expected_information = bool(normalized["expected_new_information"])
-        if int(remaining_refinement_rounds) <= 0:
-            normalized["status"] = "INCONCLUSIVE"
-            normalized["reason"] = (
-                "Refinement budget exhausted. " + normalized["reason"]
-            ).strip()
-        elif not (has_actionable_gap and has_requirement and has_expected_information):
-            normalized["status"] = "INCONCLUSIVE"
-            normalized["reason"] = (
-                "REFINE lacked a concrete evidence gap, required improvement, or expected new information. "
-                + normalized["reason"]
-            ).strip()
-    return normalized
-
-
-def merge_reliable_evidence(previous_evidence, previous_evaluation, current_evidence):
-    """Carry forward previously reliable signals and overlay the current round."""
-    if not isinstance(current_evidence, dict):
-        return current_evidence
-
-    current_signals = current_evidence.get("signals", [])
-    if not isinstance(current_signals, list):
-        current_signals = []
-    current_names = {
-        str(signal.get("signal_name", "")).strip()
-        for signal in current_signals
-        if isinstance(signal, dict)
-    }
-
-    reliable_names = set()
-    if isinstance(previous_evaluation, dict):
-        reliable = previous_evaluation.get("reliable_signals", [])
-        if isinstance(reliable, list):
-            reliable_names = {str(name).strip() for name in reliable if str(name).strip()}
-
-    preserved = []
-    if isinstance(previous_evidence, dict):
-        previous_signals = previous_evidence.get("signals", [])
-        if isinstance(previous_signals, list):
-            preserved = [
-                signal
-                for signal in previous_signals
-                if isinstance(signal, dict)
-                and str(signal.get("signal_name", "")).strip() in reliable_names
-                and str(signal.get("signal_name", "")).strip() not in current_names
-            ]
-
-    return {"signals": [*preserved, *current_signals]}
+def merge_signal_evidence(previous_evidence, current_evidence):
+    """Preserve every valid signal and let a newer signal with the same name replace it."""
+    merged = {}
+    for evidence in (previous_evidence, current_evidence):
+        if not isinstance(evidence, dict):
+            continue
+        signals = evidence.get("signals", [])
+        if not isinstance(signals, list):
+            continue
+        for signal in signals:
+            if not isinstance(signal, dict):
+                continue
+            name = str(signal.get("signal_name", "")).strip()
+            if name:
+                merged[name] = signal
+    return {"signals": list(merged.values())}
 
 
 def _compact_execution_context(result, validation_issues):
@@ -290,6 +226,7 @@ async def _generate_execute_repair(
     workspace,
     output_file,
     labels,
+    affordance_graph=None,
 ):
     raw_response = await _call_stage(
         generate_content_fn,
@@ -314,7 +251,13 @@ async def _generate_execute_repair(
     source_names = [source["name"] for source in source_manifest.get("sources", [])]
     max_chars = int(conf.get("simple_signal_max_evidence_chars", 30000))
     issues = (
-        validate_signal_evidence(result.get("evidence_json"), labels, source_names, max_chars)
+        validate_signal_evidence(
+            result.get("evidence_json"),
+            labels,
+            source_names,
+            max_chars,
+            require_multi_hop=round_index > 0,
+        )
         if not execution_needs_repair(result)
         else []
     )
@@ -329,6 +272,8 @@ async def _generate_execute_repair(
             code,
             repair_context,
             output_file,
+            affordance_graph=affordance_graph,
+            require_multi_hop=round_index > 0,
         )
         repair_raw = await _call_stage(
             generate_content_fn,
@@ -351,7 +296,13 @@ async def _generate_execute_repair(
             CONFIG_PREFIX,
         )
         issues = (
-            validate_signal_evidence(result.get("evidence_json"), labels, source_names, max_chars)
+            validate_signal_evidence(
+                result.get("evidence_json"),
+                labels,
+                source_names,
+                max_chars,
+                require_multi_hop=round_index > 0,
+            )
             if not execution_needs_repair(result)
             else []
         )
@@ -451,6 +402,8 @@ def _parse_prediction(raw_text, parser, labels):
             return prediction, {"prediction": prediction}
     match = re.search(r'"prediction"\s*:\s*"?([A-Z])', str(raw_text or ""), flags=re.IGNORECASE)
     prediction = parser(match.group(1) if match else raw_text)
+    if prediction in labels:
+        return prediction, {"prediction": prediction}
     return prediction, parsed
 
 
@@ -472,13 +425,12 @@ async def run_simple_signal_stage1(
     affordance_graph = build_evidence_affordance_graph(source_manifest, conf["dataset"])
     max_evidence_chars = int(conf.get("simple_signal_max_evidence_chars", 30000))
     output_file = f"output/simple_signal_evidence_bundle{sample['bundle_id']}_round1.json"
-    prompt = signal_code_prompt(
+    prompt = stage1_code_prompt(
         case_view,
         source_manifest,
         affordance_graph,
         output_file,
         max_evidence_chars,
-        refinement_context=None,
     )
     if debug_callback:
         debug_callback("Simple Signal Stage 1 Code Prompt", prompt)
@@ -495,6 +447,7 @@ async def run_simple_signal_stage1(
         workspace=workspace,
         output_file=output_file,
         labels=labels,
+        affordance_graph=affordance_graph,
     )
     return {
         "method": "simple_generate_evaluate_decide_stage1_only",
@@ -535,23 +488,30 @@ async def run_simple_signal_agent(
     max_evidence_chars = int(conf.get("simple_signal_max_evidence_chars", 30000))
 
     round_trace = []
-    evaluation_history = []
     refinement_context = None
-    final_evidence = None
-    final_evaluation = _evaluation_fallback("No signal round completed.")
+    final_evidence = {"signals": []}
 
     for round_index in range(max_refinements + 1):
         output_file = (
             f"output/simple_signal_evidence_bundle{sample['bundle_id']}_round{round_index + 1}.json"
         )
-        code_prompt = signal_code_prompt(
-            case_view,
-            source_manifest,
-            affordance_graph,
-            output_file,
-            max_evidence_chars,
-            refinement_context=refinement_context,
-        )
+        if round_index == 0:
+            code_prompt = stage1_code_prompt(
+                case_view,
+                source_manifest,
+                affordance_graph,
+                output_file,
+                max_evidence_chars,
+            )
+        else:
+            code_prompt = stage2_code_prompt(
+                case_view,
+                source_manifest,
+                affordance_graph,
+                output_file,
+                max_evidence_chars,
+                refinement_context=refinement_context,
+            )
         if is_first_sample and debug_callback:
             debug_callback(f"Simple Signal Code Prompt {round_index + 1}", code_prompt)
 
@@ -567,85 +527,32 @@ async def run_simple_signal_agent(
             workspace=workspace,
             output_file=output_file,
             labels=labels,
+            affordance_graph=affordance_graph,
         )
         evidence = code_result["accepted_evidence"]
-        evidence_for_evaluation = None
-        remaining = max_refinements - round_index
-        evaluation_prompt = ""
-        evaluation_raw = ""
-
-        if evidence is None:
-            final_evaluation = _evaluation_fallback(
-                "Signal code did not produce valid evidence after the configured repair attempts. "
-                + "; ".join(code_result["validation_issues"])
-            )
-        else:
-            evidence_for_evaluation = merge_reliable_evidence(
-                final_evidence,
-                final_evaluation,
-                evidence,
-            )
-            evaluation_prompt = sufficiency_evaluation_prompt(
-                case_view,
-                source_manifest,
-                affordance_graph,
-                code_result["generated_code"],
-                code_result["execution_summary"],
-                evidence_for_evaluation,
-                round_index,
-                remaining,
-                evaluation_history,
-            )
-            if is_first_sample and debug_callback:
-                debug_callback(
-                    f"Simple Signal Sufficiency Evaluation Prompt {round_index + 1}",
-                    evaluation_prompt,
-                )
-            evaluation_raw = await _call_stage(
-                generate_content_fn,
-                clients["evaluator"],
-                conf,
-                evaluation_prompt,
-                "simple_signal_evaluation_max_output_tokens",
-                1800,
-                f"simple signal sufficiency evaluation round {round_index + 1}",
-            )
-            final_evaluation = normalize_evaluation(
-                parse_json_from_text(evaluation_raw),
-                remaining,
-            )
-            final_evidence = evidence_for_evaluation
+        if evidence is not None:
+            final_evidence = merge_signal_evidence(final_evidence, evidence)
 
         round_trace.append(
             {
                 "round": round_index + 1,
+                "round_role": "primitive_signal_scan" if round_index == 0 else "multi_hop_refinement",
                 "code_prompt": code_prompt,
                 "code_raw_response": code_result["raw_response"],
                 "generated_code": code_result["generated_code"],
                 "code_repairs": code_result["repairs"],
                 "execution_summary": code_result["execution_summary"],
                 "validation_issues": code_result["validation_issues"],
+                "rule_validation_passed": evidence is not None,
                 "accepted_evidence": evidence,
-                "evidence_for_evaluation": evidence_for_evaluation,
-                "evaluation_prompt": evaluation_prompt,
-                "evaluation_raw_response": evaluation_raw,
-                "evaluation": final_evaluation,
+                "merged_evidence_after_round": final_evidence,
             }
         )
 
-        if evidence is None or final_evaluation["status"] != "REFINE":
+        if evidence is None:
             break
 
-        evaluation_history.append(final_evaluation)
-        refinement_context = {
-            "previous_code": code_result["generated_code"],
-            "previous_evidence": final_evidence,
-            "execution_summary": code_result["execution_summary"],
-            "evaluator_feedback": final_evaluation,
-        }
-
-    if final_evidence is None:
-        final_evidence = {"signals": []}
+        refinement_context = final_evidence
 
     decision_case = build_decision_case(sample, conf)
     final_prompt = decision_prompt(
@@ -676,9 +583,7 @@ async def run_simple_signal_agent(
         "simple_signal_refinement_count": max(0, len(round_trace) - 1),
         "simple_signal_round_trace": compact_json(round_trace),
         "simple_signal_final_evidence_json": compact_json(final_evidence),
-        "simple_signal_final_evaluation_json": compact_json(final_evaluation),
-        "simple_signal_final_status": final_evaluation.get("status", "INCONCLUSIVE"),
-        "simple_signal_final_evidence_quality": final_evaluation.get("evidence_quality", "NONE"),
+        "simple_signal_rule_validation_passed": bool(final_evidence.get("signals")),
         "simple_signal_decision_prompt": final_prompt,
         "simple_signal_decision_raw_response": decision_raw,
         "simple_signal_decision_json": compact_json(decision_json),
