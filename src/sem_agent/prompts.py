@@ -30,30 +30,6 @@ def _dump(value):
     return json.dumps(value, ensure_ascii=False, indent=2, default=str)
 
 
-def _dataset_domain_note(dataset):
-    """Return domain-specific compatibility framing for the given dataset."""
-    name = str(dataset or "").lower()
-    if "pog" in name:
-        return (
-            "Domain: fashion outfit completion. "
-            "A well-formed outfit combines COMPLEMENTARY items across different "
-            "categories (e.g. shoes + bag + earrings + top). "
-            "Items from the SAME category as an existing bundle item are almost "
-            "never the correct answer. Do NOT interpret high similarity as "
-            "compatibility — similar items suggest redundancy, not fit."
-        )
-    if "spotify" in name:
-        return (
-            "Domain: music playlist continuation. "
-            "A good continuation track shares mood, tempo, or genre context with "
-            "the existing tracks rather than duplicating them exactly."
-        )
-    return (
-        "Domain: bundle completion. "
-        "Focus on items that complement the partial bundle, not items that "
-        "merely resemble existing bundle members."
-    )
-
 
 def _shared_rules(output_file, labels, max_evidence_chars):
     return (
@@ -109,45 +85,31 @@ def stage1_ecosystem_prompt(
     pure-text narratives — no bare numeric values allowed.
     """
     labels = ", ".join(candidate_labels(case_view))
-    domain_note = _dataset_domain_note(case_view["dataset"])
 
     semantic_goals = (
-        "Your code must investigate ALL THREE of the following semantic goals. "
+        "Your code must investigate BOTH of the following semantic goals. "
         "Each goal should become one or more signals in the output JSON.\n\n"
 
-        "GOAL 1 — Candidate Ecosystem Profile (required)\n"
-        "  Question: What world does each candidate belong to in the training data?\n"
-        "  Investigate: Which categories, styles, or item types co-appear with each "
-        "candidate in bundles (bi_train.txt) or in user interaction histories "
-        "(ui_full.txt)? Use feature tensors only as a retrieval bridge to find "
-        "similar items, then look up THOSE items' bundle/user contexts.\n"
-        "  Output: For each candidate, a narrative string describing its ecosystem "
-        '  (e.g. "earrings — co-appears mainly with dresses, heels, and handbags '
-        '  across 12 bundles; users who interacted also bought formal accessories").\n\n'
-
-        "GOAL 2 — Partial Bundle Profile (required)\n"
-        "  Question: What style and category world is already established by the "
-        "partial bundle item(s)?\n"
-        "  Investigate: Which categories and item types most frequently co-appear "
-        "with the partial item(s) in bi_train.txt? What do users who interacted "
-        "with the partial item also tend to engage with (ui_full.txt)?\n"
-        "  Output: A single narrative describing the established ecosystem "
-        '  (e.g. "high heels — bundle neighbors are mostly bags, earrings, dresses; '
-        '  user neighbors lean toward formal/dressy items").\n'
+        "GOAL 1 — Partial Bundle Profile (required)\n"
+        "  Question: What semantic context or ecosystem is established by the partial bundle item(s)?\n"
+        "  Investigate: Explore the available data (e.g., bundles, user interactions, or metadata) "
+        "to discover the typical neighborhood of the partial item(s). What characterizes the items "
+        "that frequently co-occur with them?\n"
+        "  Output: A single narrative describing the discovered semantic context "
+        '  (e.g. "high heels — often found in formal contexts, frequently paired with '
+        '  accessories and small bags, and favored by users who look for party wear").\n'
         "  Note: This goal produces one signal whose `value` is the same for all "
         "candidates (it describes the partial bundle, not per-candidate). Still "
         "include all candidate labels in candidate_observations with the same value.\n\n"
 
-        "GOAL 3 — User Preference Context (required if ui_full.txt is available)\n"
-        "  Question: What do users who engaged with the partial item tend to "
-        "also engage with, and does that overlap with each candidate?\n"
-        "  Investigate: Find users who interacted with the partial item (ui_full.txt). "
-        "Among those users' other interactions, which item categories or specific "
-        "items appear most? Check whether each candidate falls into those preferred "
-        "categories.\n"
-        "  Output: For each candidate, a narrative string describing whether its "
-        "category/style aligns with the revealed user preferences "
-        '  (e.g. "earrings category matches Top-2 user preference category").\n\n'
+        "GOAL 2 — Candidate Ecosystem Profile (required)\n"
+        "  Question: What semantic context or ecosystem does each candidate belong to?\n"
+        "  Investigate: Use the available sources to uncover the typical environments "
+        "(bundles, users, or attributes) where each candidate is found. If using feature "
+        "tensors, use them only as a retrieval bridge to find similar anchor items.\n"
+        "  Output: For each candidate, a narrative string describing its discovered ecosystem "
+        '  (e.g. "earrings — resides in a formal/dressy space, typically co-occurring '
+        '  with evening wear rather than casual items").\n\n'
 
         "IMPLEMENTATION NOTES\n"
         "- You are FREE to choose any traversal paths through the available sources "
@@ -166,7 +128,6 @@ def stage1_ecosystem_prompt(
         "Generate ONLY complete executable Python code — no markdown fences, no explanation.\n"
         "The script runs with the allowed workspace as its current directory.\n\n"
         f"{task_semantics(case_view['dataset'])}\n\n"
-        f"{domain_note}\n\n"
         f"{semantic_goals}\n"
         f"{_shared_rules(output_file, labels, max_evidence_chars)}\n"
         f"ID-only case:\n{_dump(case_view)}\n\n"
@@ -192,7 +153,6 @@ def stage2_gap_prompt(
     is missing and which candidate best fills that gap.
     """
     labels = ", ".join(candidate_labels(case_view))
-    domain_note = _dataset_domain_note(case_view["dataset"])
     relation_map = render_affordance_relation_map(affordance_graph)
 
     semantic_goals = (
@@ -244,7 +204,6 @@ def stage2_gap_prompt(
         "Generate ONLY complete executable Python code — no markdown fences, no explanation.\n"
         "The script runs with the allowed workspace as its current directory.\n\n"
         f"{task_semantics(case_view['dataset'])}\n\n"
-        f"{domain_note}\n\n"
         f"{semantic_goals}\n"
         f"{_shared_rules(output_file, labels, max_evidence_chars)}\n"
         f"ID-only case:\n{_dump(case_view)}\n\n"

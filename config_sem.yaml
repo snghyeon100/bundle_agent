@@ -14,8 +14,8 @@ seed: 45
 shuffle_seed: 41
 
 # LLM
-llm_provider: openai           # gemini | openai
-model: gpt-4.1
+llm_provider: gemini           # gemini | openai
+model: gemini-3-flash-preview
 temperature: 0.0
 openai_send_temperature: true
 openai_reasoning_effort: ""    # minimal | low | medium | high
@@ -23,8 +23,8 @@ openai_reasoning_effort: ""    # minimal | low | medium | high
 # sem_agent stage clients
 # Code client: Stage 1 (Ecosystem Profile) + Stage 2 (Gap + Cross-val)
 # Prediction client: final Reasoning Decision (lighter model is fine)
-sem_code_api_key_env: "OPENAI_API_KEY"
-sem_prediction_api_key_env: "OPENAI_API_KEY"
+sem_code_api_key_env: "GEMINI_API_KEY_3"
+sem_prediction_api_key_env: "GEMINI_API_KEY_4"
 
 # Token budgets
 sem_code_max_output_tokens: 4000
