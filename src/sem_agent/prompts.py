@@ -330,55 +330,67 @@ def _compact(value):
 
 def _candidate_evidence_lines(evidence, label):
     lines = []
-    for signal in (evidence.get("signals", []) if isinstance(evidence, dict) else []):
+    signals = evidence.get("signals", []) if isinstance(evidence, dict) else []
+    for signal in signals:
         if not isinstance(signal, dict):
             continue
-        obs = (signal.get("candidate_observations") or {}).get(label)
-        if not isinstance(obs, dict):
+        observations = signal.get("candidate_observations", {})
+        observation = observations.get(label) if isinstance(observations, dict) else None
+        if not isinstance(observation, dict):
             continue
-        name = str(signal.get("signal_name", "signal"))
+        signal_name = str(signal.get("signal_name", "unnamed_signal"))
         sources = signal.get("sources", [])
-        src_text = ", ".join(str(s) for s in sources) if isinstance(sources, list) else str(sources)
-        path = signal.get("relation_path", [])
-        path_text = " -> ".join(str(h) for h in path) if isinstance(path, list) and path else ""
-        value_text = str(obs.get("value") or "")
-        facts = obs.get("evidence", [])
-        fact_text = "; ".join(str(f) for f in facts) if facts else ""
-        path_suffix = f" [path: {path_text}]" if path_text else ""
-        evidence_suffix = f" | facts: {fact_text}" if fact_text else ""
-        lines.append(f"   - [{name}]{path_suffix}: {value_text}{evidence_suffix}")
+        source_text = ", ".join(str(s) for s in sources) if isinstance(sources, list) else str(sources)
+        relation_path = signal.get("relation_path", [])
+        path_text = (
+            " -> ".join(str(t) for t in relation_path)
+            if isinstance(relation_path, list) and relation_path
+            else ""
+        )
+        value_text = _compact(observation.get("value"))
+        facts = observation.get("evidence", [])
+        fact_text = _compact(facts) if isinstance(facts, list) and facts else "[]"
+        path_suffix = f"; path={path_text}" if path_text else ""
+        lines.append(
+            f"   - {signal_name} [sources: {source_text}]: value={value_text}; evidence={fact_text}{path_suffix}"
+        )
     return lines
 
 
 def decision_prompt(decision_case, evidence):
     task_name, bundle_name, item_name = _decision_task_names(decision_case.get("dataset"))
-    domain_note = _dataset_domain_note(decision_case.get("dataset"))
-
     input_str = "; ".join(
-        f"{i + 1}. {item.get('text', '')}"
-        for i, item in enumerate(decision_case.get("partial_items", []))
+        f"{index + 1}. {item.get('text', '')}"
+        for index, item in enumerate(decision_case.get("partial_items", []))
     )
 
     option_blocks = []
     for candidate in decision_case.get("candidates", []):
         label = str(candidate.get("label", ""))
         block = [f"{label}. {candidate.get('text', '')}"]
-        ev_lines = _candidate_evidence_lines(evidence, label)
-        if ev_lines:
+        evidence_lines = _candidate_evidence_lines(evidence, label)
+        if evidence_lines:
             block.append("   Evidence:")
-            block.extend(ev_lines)
+            block.extend(evidence_lines)
         option_blocks.append("\n".join(block))
     target_str = "\n".join(option_blocks)
 
+    dataset_name = str(decision_case.get("dataset", "")).lower()
+    pog_guidance = ""
+    if dataset_name in ["pog", "pog_dense"]:
+        pog_guidance = (
+            "Note: For fashion outfits, similar items are rarely put together. "
+            "Therefore, you must prioritize compatibility and complementarity over item resemblance.\n"
+        )
+
     return (
-        f"You are a helpful and honest assistant evaluating {task_name}.\n"
-        f"{domain_note}\n\n"
-        "The evidence below was extracted by automated code from training data. "
-        "Use it to REASON about which candidate best COMPLEMENTS the partial bundle — "
-        "do not simply pick the candidate with the most mentions or longest evidence.\n\n"
-        f"Question: Given the partial {bundle_name}: {input_str}\n"
-        f"Which candidate {item_name} should be added to complete the {bundle_name}?\n\n"
-        f"Options:\n{target_str}\n\n"
-        "Respond with ONLY a single letter (e.g. A, B, C ...).\n"
+        f"You are a helpful and honest assistant. The following are multiple choice questions about {task_name}. "
+        "You should directly answer the question by choosing the letter of the correct option. Only provide the letter "
+        "of your answer, without any explanation or mentioning the option content.\n"
+        f"{pog_guidance}"
+        f"Question: Given the partial {bundle_name}: {input_str}, which candidate {item_name} should be included into this "
+        f"{bundle_name}?\n"
+        f"Options:\n{target_str}\n"
+        'Your answer should indicate your choice with a single letter (e.g., "A," "B," "C," etc.).\n'
         "Choice:"
     )
