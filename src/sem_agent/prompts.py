@@ -17,9 +17,6 @@ are forbidden so the decision model cannot fall back to number comparison.
 import json
 
 from .common import candidate_labels, task_semantics
-from .affordance_graph import render_affordance_relation_map
-
-
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
@@ -29,52 +26,6 @@ def _dump(value):
 
 
 
-def _shared_rules(output_file, labels, max_evidence_chars):
-    return (
-        f"Write UTF-8 JSON to exactly: {output_file}\n"
-        f"Required candidate labels for candidate-scoped signals: {labels}\n"
-        f"Keep the serialized JSON below approximately {int(max_evidence_chars)} characters.\n\n"
-        "Output schema (include `observation` only for partial_bundle signals, "
-        "and `candidate_observations` only for candidate signals):\n"
-        "{\n"
-        '  "signals": [\n'
-        "    {\n"
-        '      "signal_name": "stable_snake_case_identifier",\n'
-        '      "signal_scope": "partial_bundle | candidate",\n'
-        '      "description": "what semantic goal was investigated and what was found",\n'
-        '      "sources": ["exact source filename from manifest"],\n'
-        '      "relation_path": ["typed hop 1", "typed hop 2"],\n'
-        '      "observation": {\n'
-        '        "value": "descriptive string narrative about the partial bundle",\n'
-        '        "evidence": ["short factual sentence 1", "short factual sentence 2"]\n'
-        "      },\n"
-        '      "candidate_observations": {\n'
-        '        "A": {\n'
-        '          "value": "descriptive string narrative about candidate A",\n'
-        '          "evidence": ["short factual sentence 1", "short factual sentence 2"]\n'
-        "        }\n"
-        "      }\n"
-        "    }\n"
-        "  ]\n"
-        "}\n\n"
-        "CRITICAL value rules:\n"
-        "- `signal_scope` MUST be either `partial_bundle` or `candidate`.\n"
-        "- For `signal_scope: partial_bundle`, write one shared `observation` object and "
-        "do NOT repeat it under candidate labels.\n"
-        "- For `signal_scope: candidate`, write `candidate_observations` with every "
-        "required candidate label and do NOT write a shared `observation`.\n"
-        "- Every `value` MUST be a non-empty descriptive STRING narrative.\n"
-        "- Do NOT put a bare number (e.g. 0.71) as the sole content of `value`.\n"
-        "- Numbers MAY appear inside a narrative string for context "
-        '  (e.g. "co-appears in 5 bundles, mostly with bags and dresses").\n'
-        "- `evidence` must be a list of ≤5 short factual strings (item titles, "
-        "  category names, bundle IDs with context — not raw vector values).\n"
-        "- Every candidate-scoped signal must compute the same logic for EVERY candidate label.\n"
-        "- Source names must exactly match names in the manifest.\n"
-        "- Do NOT add prediction, winner, ranking, recommendation, or final-score fields.\n"
-        "- CPU-only environment: torch.load(..., map_location=\"cpu\").\n"
-        "- Skip unavailable sources gracefully without crashing.\n"
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -84,7 +35,6 @@ def _shared_rules(output_file, labels, max_evidence_chars):
 def stage1_ecosystem_prompt(
     case_view,
     source_manifest,
-    affordance_graph,
     output_file,
     max_evidence_chars,
     semantic_case=None,
@@ -165,7 +115,7 @@ def stage1_ecosystem_prompt(
         "The script runs with the allowed workspace as its current directory.\n\n"
         f"{task_semantics(case_view['dataset'])}\n\n"
         f"{semantic_goals}\n"
-        f"{_shared_rules(output_file, labels, max_evidence_chars)}\n"
+        #f"{_shared_rules(output_file, labels, max_evidence_chars)}\n"
         f"ID-only case:\n{_dump(case_view)}\n\n"
         f"Text-enriched case context:\n{_dump(semantic_case or {})}\n\n"
         "Use the text-enriched context as semantic context for interpreting items, "
@@ -179,25 +129,10 @@ def stage1_ecosystem_prompt(
 # Stage 2 prompt
 # ---------------------------------------------------------------------------
 
-def _stage2_rules(labels):
-    return (
-        f"Required candidate labels for candidate-scoped signals: {labels}\n\n"
-        "CRITICAL value rules:\n"
-        "- `signal_scope` MUST be either `partial_bundle` or `candidate`.\n"
-        "- For `signal_scope: partial_bundle`, write one shared `observation` object and "
-        "do NOT repeat it under candidate labels.\n"
-        "- For `signal_scope: candidate`, write `candidate_observations` with every "
-        "required candidate label and do NOT write a shared `observation`.\n"
-        "- Every `value` MUST be a non-empty descriptive STRING narrative.\n"
-        "- Do NOT put a bare number (e.g. 0.71) as the sole content of `value`.\n"
-        "- Do NOT add prediction, winner, ranking, recommendation, or final-score fields.\n"
-        "- Output valid JSON ONLY. Do not write markdown text outside the JSON block.\n"
-    )
 
 def stage2_gap_prompt(
     case_view,
     source_manifest,
-    affordance_graph,
     output_file,
     max_evidence_chars,
     stage1_evidence,
@@ -209,8 +144,6 @@ def stage2_gap_prompt(
     and explain how each candidate fits that context.
     """
     labels = ", ".join(candidate_labels(case_view))
-    relation_map = render_affordance_relation_map(affordance_graph)
-
     # Combine Stage 1 evidence into unified case
     partial_evidence = []
     for sig in stage1_evidence.get("signals", []) if isinstance(stage1_evidence, dict) else []:
@@ -338,7 +271,7 @@ def stage2_gap_prompt(
         "Your task is to analyze the provided Unified Case and output a JSON response containing your analysis.\n\n"
         f"{task_semantics(case_view['dataset'])}\n\n"
         f"{semantic_goals}\n"
-        f"{_stage2_rules(labels)}\n"
+        #f"{_stage2_rules(labels)}\n"
         f"Unified Case (ID, text, and Stage 1 evidence):\n{_dump(unified_case)}\n"
     )
 
@@ -353,21 +286,15 @@ def repair_prompt(
     previous_code,
     execution_context,
     output_file,
-    affordance_graph=None,
     require_relation_path=False,
 ):
     labels = ", ".join(candidate_labels(case_view))
     relation_path_rule = ""
-    graph_block = ""
     if require_relation_path:
         relation_path_rule = (
             " Every signal must retain `relation_path` with at least two non-empty "
             "typed transitions the repaired code actually executes."
         )
-        if affordance_graph:
-            graph_block = (
-                f"\n\nCompact Evidence Relation Map:\n"
-                f"{render_affordance_relation_map(affordance_graph)}"
             )
 
     return (

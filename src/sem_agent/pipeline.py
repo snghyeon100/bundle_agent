@@ -29,7 +29,6 @@ from .workspace import (
     execution_needs_repair,
     prepare_workspace,
 )
-from .affordance_graph import build_evidence_affordance_graph
 from .prompts import (
     decision_prompt,
     repair_prompt,
@@ -236,7 +235,6 @@ async def _generate_execute_repair(
     workspace,
     output_file,
     labels,
-    affordance_graph=None,
 ):
     max_tokens_key = "sem_stage1_max_output_tokens"
     default_tokens = 4000
@@ -269,7 +267,6 @@ async def _generate_execute_repair(
         ctx = _compact_exec_context(result, issues)
         prompt = repair_prompt(
             case_view, source_manifest, code, ctx, output_file,
-            affordance_graph=affordance_graph,
             require_relation_path=require_rpath,
         )
         repair_raw = await _call_stage(
@@ -384,7 +381,6 @@ async def run_sem_agent(
         workspace,
         str(conf.get("sem_current_bundle_train_context_policy", "allow")),
     )
-    affordance_graph = build_evidence_affordance_graph(source_manifest, conf["dataset"])
     max_chars = int(conf.get("sem_max_evidence_chars", 30000))
     decision_case = build_decision_case(sample, conf)
 
@@ -395,7 +391,6 @@ async def run_sem_agent(
     s1_prompt = stage1_ecosystem_prompt(
         case_view,
         source_manifest,
-        affordance_graph,
         s1_output_file,
         max_chars,
         semantic_case=decision_case,
@@ -415,7 +410,6 @@ async def run_sem_agent(
         workspace=workspace,
         output_file=s1_output_file,
         labels=labels,
-        affordance_graph=affordance_graph,
     )
 
     stage1_evidence = s1_result["accepted_evidence"] or {"signals": []}
@@ -426,7 +420,7 @@ async def run_sem_agent(
     # ------------------------------------------------------------------
     s2_output_file = f"output/sem_evidence_bundle{sample['bundle_id']}_stage2.json"
     s2_prompt = stage2_gap_prompt(
-        case_view, source_manifest, affordance_graph, s2_output_file, max_chars,
+        case_view, source_manifest, s2_output_file, max_chars,
         stage1_evidence=stage1_evidence,
         semantic_case=decision_case,
     )
@@ -483,7 +477,6 @@ async def run_sem_agent(
         "sem_workspace_dir": workspace["workspace_dir"],
         "sem_workspace_files": compact_json(workspace["files"]),
         "sem_source_manifest": compact_json(source_manifest),
-        "sem_affordance_graph": compact_json(affordance_graph),
         "sem_case_view": compact_json(case_view),
         "sem_decision_case": compact_json(decision_case),
         # Stage 1
