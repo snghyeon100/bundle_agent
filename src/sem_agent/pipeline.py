@@ -1,12 +1,12 @@
 """sem_agent pipeline.
 
 Two-stage fixed pipeline:
-  Stage 1 (Ecosystem Profile)   → code generates text-narrative signals about
-                                   each candidate's bundle/user ecosystem.
-  Stage 2 (Gap + Cross-val)     → code uses Stage 1 profiles to identify the
-                                   partial bundle's gap and score each candidate.
-  Decision                      → reasoning LLM picks the best candidate using
-                                   the narrative evidence (no bare numbers).
+  Stage 1 (Item Evidence Expansion)      → code retrieves supporting items that
+                                           explain each partial/candidate item.
+  Stage 2 (Bundle Context & Candidate Fit) → code builds bundle-level context
+                                             and candidate fit narratives.
+  Decision                               → reasoning LLM picks the best candidate
+                                           using narrative evidence (no bare numbers).
 """
 
 import asyncio
@@ -76,6 +76,26 @@ def _forbidden_keys(value, path=""):
     return issues
 
 
+def _validate_observation_payload(payload, path):
+    issues = []
+    if not isinstance(payload, dict):
+        return [f"{path} must be an object."]
+    if set(payload) != {"value", "evidence"}:
+        issues.append(f"{path} must contain only value and evidence.")
+    val = payload.get("value")
+    if not isinstance(val, str) or not val.strip():
+        issues.append(
+            f"{path}.value must be a non-empty string narrative "
+            f"(got {type(val).__name__}: {repr(val)[:60]})."
+        )
+    ev = payload.get("evidence")
+    if not isinstance(ev, list):
+        issues.append(f"{path}.evidence must be a list.")
+    elif len(ev) > 5:
+        issues.append(f"{path}.evidence exceeds 5 entries.")
+    return issues
+
+
 def validate_evidence(evidence, labels, allowed_source_names, max_chars=30000, require_relation_path=False):
     """Validate the generated evidence JSON.
 
@@ -103,7 +123,15 @@ def validate_evidence(evidence, labels, allowed_source_names, max_chars=30000, r
             issues.append(f"{pfx} must be an object.")
             continue
 
-        allowed_fields = {"signal_name", "description", "sources", "relation_path", "candidate_observations"}
+        allowed_fields = {
+            "signal_name",
+            "signal_scope",
+            "description",
+            "sources",
+            "relation_path",
+            "observation",
+            "candidate_observations",
+        }
         extra = sorted(set(sig) - allowed_fields)
         if extra:
             issues.append(f"{pfx} has unsupported fields: {', '.join(extra)}")
@@ -118,6 +146,10 @@ def validate_evidence(evidence, labels, allowed_source_names, max_chars=30000, r
         if not str(sig.get("description", "")).strip():
             issues.append(f"{pfx}.description must be non-empty.")
 
+        scope = str(sig.get("signal_scope", "")).strip()
+        if scope not in {"partial_bundle", "candidate"}:
+            issues.append(f"{pfx}.signal_scope must be either partial_bundle or candidate.")
+
         srcs = sig.get("sources")
         if not isinstance(srcs, list) or not srcs:
             issues.append(f"{pfx}.sources must be a non-empty list.")
@@ -131,36 +163,33 @@ def validate_evidence(evidence, labels, allowed_source_names, max_chars=30000, r
             if not isinstance(rpath, list) or len(rpath) < 2:
                 issues.append(f"{pfx}.relation_path must have at least two typed hops in Stage 2.")
 
-        obs = sig.get("candidate_observations")
-        if not isinstance(obs, dict):
-            issues.append(f"{pfx}.candidate_observations must be an object.")
+        if scope == "partial_bundle":
+            if "candidate_observations" in sig:
+                issues.append(f"{pfx} with partial_bundle scope must not include candidate_observations.")
+            issues.extend(_validate_observation_payload(sig.get("observation"), f"{pfx}.observation"))
             continue
-        missing = sorted(required - set(obs))
-        extra_labels = sorted(set(obs) - required)
-        if missing:
-            issues.append(f"{pfx} missing candidates: {', '.join(missing)}")
-        if extra_labels:
-            issues.append(f"{pfx} unknown candidates: {', '.join(extra_labels)}")
 
-        for lbl in labels:
-            cand_obs = obs.get(lbl)
-            if not isinstance(cand_obs, dict):
-                issues.append(f"{pfx}.candidate_observations.{lbl} must be an object.")
+        if scope == "candidate":
+            if "observation" in sig:
+                issues.append(f"{pfx} with candidate scope must not include observation.")
+            obs = sig.get("candidate_observations")
+            if not isinstance(obs, dict):
+                issues.append(f"{pfx}.candidate_observations must be an object.")
                 continue
-            if set(cand_obs) != {"value", "evidence"}:
-                issues.append(f"{pfx}.candidate_observations.{lbl} must contain only value and evidence.")
-            # KEY VALIDATION: value must be a non-empty string
-            val = cand_obs.get("value")
-            if not isinstance(val, str) or not val.strip():
-                issues.append(
-                    f"{pfx}.candidate_observations.{lbl}.value must be a non-empty string narrative "
-                    f"(got {type(val).__name__}: {repr(val)[:60]})."
+            missing = sorted(required - set(obs))
+            extra_labels = sorted(set(obs) - required)
+            if missing:
+                issues.append(f"{pfx} missing candidates: {', '.join(missing)}")
+            if extra_labels:
+                issues.append(f"{pfx} unknown candidates: {', '.join(extra_labels)}")
+
+            for lbl in labels:
+                issues.extend(
+                    _validate_observation_payload(
+                        obs.get(lbl),
+                        f"{pfx}.candidate_observations.{lbl}",
+                    )
                 )
-            ev = cand_obs.get("evidence")
-            if not isinstance(ev, list):
-                issues.append(f"{pfx}.candidate_observations.{lbl}.evidence must be a list.")
-            elif len(ev) > 3:
-                issues.append(f"{pfx}.candidate_observations.{lbl}.evidence exceeds 3 entries.")
 
     size = len(compact_json(evidence))
     if size > int(max_chars):
@@ -347,7 +376,7 @@ async def run_sem_agent(
     debug_callback=None,
     is_first_sample=False,
 ):
-    """Run the full 2-stage Semantic Compatibility Profiling pipeline."""
+    """Run the full 2-stage semantic evidence pipeline."""
     case_view = build_case_view(sample, conf["dataset"])
     labels = candidate_labels(case_view)
     workspace = prepare_workspace(conf, config_prefix=CONFIG_PREFIX)
@@ -357,16 +386,22 @@ async def run_sem_agent(
     )
     affordance_graph = build_evidence_affordance_graph(source_manifest, conf["dataset"])
     max_chars = int(conf.get("sem_max_evidence_chars", 30000))
+    decision_case = build_decision_case(sample, conf)
 
     # ------------------------------------------------------------------
-    # Stage 1: Ecosystem Profile
+    # Stage 1: Item Evidence Expansion
     # ------------------------------------------------------------------
     s1_output_file = f"output/sem_evidence_bundle{sample['bundle_id']}_stage1.json"
     s1_prompt = stage1_ecosystem_prompt(
-        case_view, source_manifest, affordance_graph, s1_output_file, max_chars,
+        case_view,
+        source_manifest,
+        affordance_graph,
+        s1_output_file,
+        max_chars,
+        semantic_case=decision_case,
     )
     if is_first_sample and debug_callback:
-        debug_callback("Sem Agent Stage 1 Prompt", s1_prompt)
+        debug_callback("Sem Agent Stage 1 Item Evidence Expansion Prompt", s1_prompt)
 
     s1_result = await _generate_execute_repair(
         bundle_id=sample["bundle_id"],
@@ -386,32 +421,37 @@ async def run_sem_agent(
     stage1_evidence = s1_result["accepted_evidence"] or {"signals": []}
 
     # ------------------------------------------------------------------
-    # Stage 2: Gap + Cross-validation
+    # Stage 2: Bundle Context & Candidate Fit
     # ------------------------------------------------------------------
     s2_output_file = f"output/sem_evidence_bundle{sample['bundle_id']}_stage2.json"
     s2_prompt = stage2_gap_prompt(
         case_view, source_manifest, affordance_graph, s2_output_file, max_chars,
         stage1_evidence=stage1_evidence,
+        semantic_case=decision_case,
     )
     if is_first_sample and debug_callback:
-        debug_callback("Sem Agent Stage 2 Prompt", s2_prompt)
+        debug_callback("Sem Agent Stage 2 Bundle Context & Candidate Fit Prompt", s2_prompt)
 
-    s2_result = await _generate_execute_repair(
-        bundle_id=sample["bundle_id"],
-        stage_index=1,
-        case_view=case_view,
-        source_manifest=source_manifest,
-        initial_prompt=s2_prompt,
-        client=clients["code"],
-        conf=conf,
-        generate_content_fn=generate_content_fn,
-        workspace=workspace,
-        output_file=s2_output_file,
-        labels=labels,
-        affordance_graph=affordance_graph,
+    s2_raw = await _call_stage(
+        generate_content_fn,
+        clients["code"],
+        conf,
+        s2_prompt,
+        "sem_code_max_output_tokens",
+        4000,
+        "sem stage2 reasoning",
     )
-
-    stage2_evidence = s2_result["accepted_evidence"] or {"signals": []}
+    
+    stage2_evidence = parse_json_from_text(s2_raw) or {"signals": []}
+    
+    s2_result = {
+        "raw_response": s2_raw,
+        "generated_code": "",
+        "repairs": [],
+        "execution_summary": {"msg": "pure reasoning, skipped execution"},
+        "validation_issues": [],
+        "accepted_evidence": stage2_evidence if "signals" in stage2_evidence else None,
+    }
 
     # Merge Stage 1 + Stage 2 evidence; Stage 2 wins on name conflicts
     final_evidence = merge_evidence(stage1_evidence, stage2_evidence)
@@ -419,7 +459,6 @@ async def run_sem_agent(
     # ------------------------------------------------------------------
     # Decision
     # ------------------------------------------------------------------
-    decision_case = build_decision_case(sample, conf)
     d_prompt = decision_prompt(decision_case, final_evidence)
     if is_first_sample and debug_callback:
         debug_callback("Sem Agent Decision Prompt", d_prompt)

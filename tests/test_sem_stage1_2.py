@@ -13,7 +13,7 @@ from sem_agent.common import build_case_view, candidate_labels, compact_json
 from sem_agent.workspace import prepare_workspace, build_source_manifest
 from sem_agent.affordance_graph import build_evidence_affordance_graph
 from sem_agent.prompts import stage1_ecosystem_prompt, stage2_gap_prompt
-from sem_agent.pipeline import _generate_execute_repair
+from sem_agent.pipeline import _generate_execute_repair, build_decision_case
 
 load_dotenv(
     dotenv_path=os.path.join(os.path.dirname(__file__), "..", ".env"),
@@ -26,6 +26,7 @@ async def run_stage1_and_stage2_only(conf, sample, clients):
     
     # Setup
     case_view = build_case_view(sample, conf["dataset"])
+    semantic_case = build_decision_case(sample, conf)
     labels = candidate_labels(case_view)
     workspace = prepare_workspace(conf, config_prefix="sem")
     source_manifest = build_source_manifest(
@@ -35,10 +36,15 @@ async def run_stage1_and_stage2_only(conf, sample, clients):
     affordance_graph = build_evidence_affordance_graph(source_manifest, conf["dataset"])
     max_chars = int(conf.get("sem_max_evidence_chars", 30000))
     
-    print("\n[Stage 1] Executing...")
+    print("\n[Stage 1: Item Evidence Expansion] Executing...")
     s1_output_file = f"output/test_sem_bundle{sample['bundle_id']}_stage1.json"
     s1_prompt = stage1_ecosystem_prompt(
-        case_view, source_manifest, affordance_graph, s1_output_file, max_chars,
+        case_view,
+        source_manifest,
+        affordance_graph,
+        s1_output_file,
+        max_chars,
+        semantic_case=semantic_case,
     )
     
     s1_result = await _generate_execute_repair(
@@ -62,7 +68,7 @@ async def run_stage1_and_stage2_only(conf, sample, clients):
     print("Stage 1 Evidence Output:")
     print(compact_json(stage1_evidence))
     
-    print("\n[Stage 2] Executing...")
+    print("\n[Stage 2: Bundle Context & Candidate Fit] Executing...")
     s2_output_file = f"output/test_sem_bundle{sample['bundle_id']}_stage2.json"
     s2_prompt = stage2_gap_prompt(
         case_view, source_manifest, affordance_graph, s2_output_file, max_chars,
@@ -94,7 +100,9 @@ async def run_stage1_and_stage2_only(conf, sample, clients):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Test Stage 1 & 2 of sem_agent without decision")
+    parser = argparse.ArgumentParser(
+        description="Test sem_agent Stage 1 Item Evidence Expansion and Stage 2 Bundle Context & Candidate Fit without decision"
+    )
     parser.add_argument("--config", default="config_sem.yaml")
     parser.add_argument("--bundle_index", type=int, default=0, help="Index of the bundle in the dataset to test")
     args = parser.parse_args()

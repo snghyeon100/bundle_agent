@@ -1,7 +1,7 @@
-"""Semantic Compatibility Profiling agent.
+"""Semantic evidence expansion agent.
 
-Two-stage code-generation pipeline that extracts relational ecosystem profiles
-(Stage 1) and gap/cross-validation narratives (Stage 2) as pure-text signals,
+Two-stage code-generation pipeline that expands item-level supporting evidence
+(Stage 1) and builds bundle context plus candidate-fit narratives (Stage 2),
 then feeds them to a reasoning decision model.
 """
 
