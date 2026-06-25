@@ -1,3 +1,10 @@
+"""main_sem.py — Entry point for the sem_agent pipeline.
+
+Usage:
+    python main_sem.py --config config_sem.yaml
+    python main_sem.py --config config_sem.yaml --resume results/.../partial.csv
+"""
+
 import argparse
 import asyncio
 import os
@@ -11,34 +18,8 @@ from dotenv import load_dotenv
 from google import genai
 
 from dataset import BundleZeroShotDataset, set_seed
-from progressive_signal_agent import run_progressive_signal_agent
-from progressive_signal_agent.common import compact_json
-from simple_signal_agent import run_simple_signal_agent
-
-
-class QuotaExceededError(RuntimeError):
-    pass
-
-
-PSD_METHOD = "progressive_signal_discovery"
-SIMPLE_SIGNAL_METHOD = "simple_generate_evaluate_decide"
-
-
-def selected_method(conf):
-    value = str(conf.get("method", PSD_METHOD)).strip().lower().replace("-", "_")
-    aliases = {
-        "psd": PSD_METHOD,
-        PSD_METHOD: PSD_METHOD,
-        "simple_signal": SIMPLE_SIGNAL_METHOD,
-        "simple_signal_agent": SIMPLE_SIGNAL_METHOD,
-        "generate_evaluate_decide": SIMPLE_SIGNAL_METHOD,
-        SIMPLE_SIGNAL_METHOD: SIMPLE_SIGNAL_METHOD,
-    }
-    if value not in aliases:
-        raise ValueError(
-            f"Unsupported method: {value}. Choose {PSD_METHOD} or {SIMPLE_SIGNAL_METHOD}."
-        )
-    return aliases[value]
+from sem_agent import run_sem_agent
+from sem_agent.common import compact_json
 
 
 load_dotenv(
@@ -46,24 +27,15 @@ load_dotenv(
     encoding="utf-8-sig",
 )
 
-
-def parse_model_response(raw_text):
-    if not raw_text:
-        return "ERR_EM"
-    clean = re.sub(r"(?i)\b(choice|option|answer|prediction)\b\s*[:=]*\s*", "", str(raw_text).strip())
-    match = re.search(r"([A-Z])", clean.upper())
-    return match.group(1) if match else clean[:1].upper()
+METHOD_NAME = "sem_agent"
 
 
-def console_safe_text(text):
-    encoding = sys.stdout.encoding or "utf-8"
-    return str(text).encode(encoding, errors="backslashreplace").decode(encoding)
+# ---------------------------------------------------------------------------
+# LLM infrastructure  (reused from main.py patterns)
+# ---------------------------------------------------------------------------
 
-
-def print_prompt_debug(title, prompt):
-    print(f"\n[DEBUG] {title}:")
-    print(console_safe_text(prompt))
-    print("-" * 60 + "\n")
+class QuotaExceededError(RuntimeError):
+    pass
 
 
 def llm_provider(conf):
@@ -80,7 +52,6 @@ def create_llm_client(conf, api_key):
         return genai.Client(api_key=api_key)
     if provider == "openai":
         from openai import AsyncOpenAI
-
         return AsyncOpenAI(api_key=api_key)
     raise ValueError(f"Unsupported llm_provider: {provider}")
 
@@ -90,29 +61,25 @@ def resolve_api_key(conf, config_key, fallback_envs):
     if configured:
         value = os.getenv(configured, "").strip()
         if not value:
-            raise ValueError(f"API key environment variable is not set: {configured}")
+            raise ValueError(f"API key env var not set: {configured}")
         return value, configured
-    for env_name in fallback_envs:
-        value = os.getenv(env_name, "").strip()
+    for env in fallback_envs:
+        value = os.getenv(env, "").strip()
         if value:
-            return value, env_name
-    raise ValueError(f"None of these API key environment variables are set: {', '.join(fallback_envs)}")
+            return value, env
+    raise ValueError(f"None of these API key env vars are set: {', '.join(fallback_envs)}")
 
 
 def is_quota_error(exc):
-    message = str(exc).lower()
-    return any(
-        marker in message
-        for marker in ("403", "quota", "rate limit exceeded", "resource exhausted", "permission denied", "billing")
-    )
+    msg = str(exc).lower()
+    return any(m in msg for m in ("403", "quota", "rate limit exceeded", "resource exhausted",
+                                   "permission denied", "billing"))
 
 
 def is_retryable_error(exc):
-    message = str(exc).lower()
-    return any(
-        marker in message
-        for marker in ("503", "high demand", "overloaded", "service unavailable", "temporarily unavailable", "try again later")
-    )
+    msg = str(exc).lower()
+    return any(m in msg for m in ("503", "high demand", "overloaded", "service unavailable",
+                                   "temporarily unavailable", "try again later"))
 
 
 async def call_llm_once(client, model, contents, conf, max_output_tokens):
@@ -126,7 +93,6 @@ async def call_llm_once(client, model, contents, conf, max_output_tokens):
             },
         )
         return response.text or ""
-
     request = {
         "model": model,
         "input": contents,
@@ -149,7 +115,7 @@ async def generate_content_with_retry(client, model, contents, conf, max_output_
             return await call_llm_once(client, model, contents, conf, max_output_tokens)
         except Exception as exc:
             if is_quota_error(exc):
-                raise QuotaExceededError(f"Quota or permission error during {step_name}: {exc}") from exc
+                raise QuotaExceededError(f"Quota error during {step_name}: {exc}") from exc
             if is_retryable_error(exc) and attempt < max_retries:
                 wait = base_wait * (attempt + 1)
                 print(f"[Retry] {step_name} ({attempt + 1}/{max_retries}); waiting {wait:.1f}s")
@@ -158,13 +124,35 @@ async def generate_content_with_retry(client, model, contents, conf, max_output_
             raise
 
 
+def parse_model_response(raw_text):
+    if not raw_text:
+        return "ERR_EM"
+    clean = re.sub(r"(?i)\b(choice|option|answer|prediction)\b\s*[:=]*\s*", "", str(raw_text).strip())
+    match = re.search(r"([A-Z])", clean.upper())
+    return match.group(1) if match else clean[:1].upper()
+
+
+def console_safe(text):
+    enc = sys.stdout.encoding or "utf-8"
+    return str(text).encode(enc, errors="backslashreplace").decode(enc)
+
+
+def print_debug(title, prompt):
+    print(f"\n[DEBUG] {title}:")
+    print(console_safe(prompt))
+    print("-" * 60 + "\n")
+
+
+# ---------------------------------------------------------------------------
+# Results I/O
+# ---------------------------------------------------------------------------
+
 def result_path(conf, timestamp, partial=False):
     directory = os.path.join(conf["output_dir"], conf["dataset"])
     os.makedirs(directory, exist_ok=True)
     suffix = "_partial" if partial else ""
-    method = selected_method(conf)
     filename = (
-        f"results_{conf['dataset']}_{method}_"
+        f"results_{conf['dataset']}_{METHOD_NAME}_"
         f"C{conf.get('num_cans', '')}_T{conf.get('num_token', '')}_{timestamp}{suffix}.csv"
     )
     return os.path.join(directory, filename)
@@ -173,7 +161,7 @@ def result_path(conf, timestamp, partial=False):
 def save_results(results, conf, timestamp, partial=False):
     frame = pd.DataFrame(results)
     hit_rate = frame["hit"].mean() if not frame.empty else 0.0
-    valid_labels = [chr(ord("A") + index) for index in range(int(conf.get("num_cans", 10)))]
+    valid_labels = [chr(ord("A") + i) for i in range(int(conf.get("num_cans", 10)))]
     valid_mask = frame["prediction"].isin(valid_labels) if not frame.empty else pd.Series(dtype=bool)
     valid_ratio = valid_mask.mean() if not frame.empty else 0.0
     valid_hit_rate = frame.loc[valid_mask, "hit"].mean() if valid_mask.sum() else 0.0
@@ -182,42 +170,17 @@ def save_results(results, conf, timestamp, partial=False):
         frame["overall_hit_rate"] = hit_rate
         frame["overall_valid_ratio"] = valid_ratio
         frame["valid_only_hit_rate"] = valid_hit_rate
+        # Record config fields
         config_fields = [
-            "method",
-            "dataset",
-            "num_cans",
-            "num_token",
-            "toy_eval",
-            "seed",
-            "shuffle_seed",
-            "llm_provider",
-            "model",
-            "temperature",
-            "psd_broad_planning_max_output_tokens",
-            "psd_code_max_output_tokens",
-            "psd_diagnosis_max_output_tokens",
-            "psd_deep_planning_max_output_tokens",
-            "psd_prediction_max_output_tokens",
-            "psd_max_deep_rounds",
-            "psd_code_max_repair_attempts",
-            "psd_current_bundle_train_context_policy",
-            "psd_code_timeout_seconds",
-            "psd_enable_code_guard",
-            "simple_signal_code_max_output_tokens",
-            "simple_signal_prediction_max_output_tokens",
-            "simple_signal_max_refinement_rounds",
-            "simple_signal_code_max_repair_attempts",
-            "simple_signal_max_evidence_chars",
-            "simple_signal_current_bundle_train_context_policy",
-            "simple_signal_code_timeout_seconds",
-            "simple_signal_enable_code_guard",
+            "method", "dataset", "num_cans", "num_token", "toy_eval", "seed",
+            "shuffle_seed", "llm_provider", "model", "temperature",
+            "sem_code_max_output_tokens", "sem_prediction_max_output_tokens",
+            "sem_code_max_repair_attempts", "sem_max_evidence_chars",
+            "sem_current_bundle_train_context_policy",
+            "sem_code_timeout_seconds", "sem_enable_code_guard",
         ]
         for field in config_fields:
             frame[f"cfg_{field}"] = conf.get(field, "")
-        frame["cfg_psd_allowed_files"] = compact_json(conf.get("psd_allowed_files", []))
-        frame["cfg_simple_signal_allowed_files"] = compact_json(
-            conf.get("simple_signal_allowed_files", [])
-        )
         frame["cfg_max_retries"] = conf.get("max_retries", "")
         frame["cfg_retry_wait_seconds"] = conf.get("retry_wait_seconds", "")
 
@@ -226,15 +189,11 @@ def save_results(results, conf, timestamp, partial=False):
     return path, frame, hit_rate, valid_ratio, valid_hit_rate, int(valid_mask.sum()) if not frame.empty else 0
 
 
-async def process_samples(
-    clients,
-    samples,
-    conf,
-    timestamp,
-    method,
-    initial_results=None,
-    start_idx=0,
-):
+# ---------------------------------------------------------------------------
+# Sample processing
+# ---------------------------------------------------------------------------
+
+async def process_samples(clients, samples, conf, timestamp, initial_results=None, start_idx=0):
     results = list(initial_results or [])
     concurrency = int(conf.get("max_concurrent", 1))
     semaphore = asyncio.Semaphore(concurrency)
@@ -244,19 +203,14 @@ async def process_samples(
         row = dict(sample)
         async with semaphore:
             try:
-                runner = (
-                    run_simple_signal_agent
-                    if method == SIMPLE_SIGNAL_METHOD
-                    else run_progressive_signal_agent
-                )
-                updates, prediction, raw_response = await runner(
+                updates, prediction, raw_response = await run_sem_agent(
                     sample,
                     conf,
                     clients,
                     generate_content_with_retry,
                     parse_model_response,
-                    debug_callback=print_prompt_debug,
-                    is_first_sample=current_idx == start_idx,
+                    debug_callback=print_debug,
+                    is_first_sample=(current_idx == start_idx),
                 )
                 row.update(updates)
             except QuotaExceededError:
@@ -271,8 +225,8 @@ async def process_samples(
         return row
 
     for offset in range(0, len(samples), concurrency):
-        chunk = samples[offset : offset + concurrency]
-        tasks = [run_one(sample, start_idx + offset + index) for index, sample in enumerate(chunk)]
+        chunk = samples[offset: offset + concurrency]
+        tasks = [run_one(s, start_idx + offset + i) for i, s in enumerate(chunk)]
         try:
             completed = await asyncio.gather(*tasks)
         except QuotaExceededError:
@@ -283,6 +237,25 @@ async def process_samples(
     return results
 
 
+def _build_clients(conf):
+    fallback = default_api_key_envs(conf)
+    clients = {}
+    resolved = {}
+    prior = []
+    # sem_agent uses three roles: stage1, stage2, and prediction (Decision)
+    role_keys = [
+        ("stage1", "sem_stage1_api_key_env"),
+        ("stage2", "sem_stage2_api_key_env"),
+        ("prediction", "sem_prediction_api_key_env"),
+    ]
+    for role, key in role_keys:
+        api_key, env = resolve_api_key(conf, key, prior + fallback)
+        clients[role] = create_llm_client(conf, api_key)
+        resolved[role] = env
+        prior.append(env)
+    return clients, resolved
+
+
 def load_resume(path):
     try:
         return pd.read_csv(path, encoding="utf-8-sig")
@@ -290,104 +263,76 @@ def load_resume(path):
         return pd.read_csv(path, encoding="cp949")
 
 
-def _build_clients(conf, method):
-    fallback = default_api_key_envs(conf)
-    clients = {}
-    resolved_envs = {}
-    prior_envs = []
-    if method == SIMPLE_SIGNAL_METHOD:
-        role_keys = (
-            ("code", "simple_signal_code_api_key_env"),
-            ("prediction", "simple_signal_prediction_api_key_env"),
-        )
-    else:
-        role_keys = (
-            ("planning", "psd_planning_api_key_env"),
-            ("code", "psd_code_api_key_env"),
-            ("diagnosis", "psd_diagnosis_api_key_env"),
-            ("prediction", "psd_prediction_api_key_env"),
-        )
-    for role, key in role_keys:
-        api_key, env_name = resolve_api_key(conf, key, prior_envs + fallback)
-        clients[role] = create_llm_client(conf, api_key)
-        resolved_envs[role] = env_name
-        prior_envs.append(env_name)
-    return clients, resolved_envs
-
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="Run source-grounded bundle evaluation")
-    parser.add_argument("--config", default="config.yaml")
+    parser = argparse.ArgumentParser(description="Run sem_agent bundle evaluation")
+    parser.add_argument("--config", default="config_sem.yaml")
     parser.add_argument("--start_idx", type=int, default=0)
     parser.add_argument("--resume", default="")
     args = parser.parse_args()
 
-    with open(args.config, "r", encoding="utf-8") as handle:
-        conf = yaml.safe_load(handle)
-    try:
-        method = selected_method(conf)
-    except ValueError as exc:
-        print(f"[Error] {exc}")
-        return 1
+    with open(args.config, "r", encoding="utf-8") as f:
+        conf = yaml.safe_load(f)
+
     os.makedirs(conf["output_dir"], exist_ok=True)
     set_seed(int(conf.get("seed", 45)))
 
     samples = BundleZeroShotDataset(conf).get_eval_samples()
     initial_results = None
     timestamp = time.strftime("%Y%m%d_%H%M%S")
-    if args.resume and os.path.exists(args.resume):
-        previous = load_resume(args.resume)
-        initial_results = previous.to_dict("records")
-        args.start_idx = len(initial_results)
-        match = re.search(r"_(\d{8}_\d{6})(?:_partial)?\.csv$", args.resume)
-        if match:
-            timestamp = match.group(1)
-    if args.start_idx > 0:
-        samples = samples[args.start_idx :]
 
-    print(f">>> Config: {args.config}")
-    print(f">>> Method: {method}")
+    if args.resume and os.path.exists(args.resume):
+        prev = load_resume(args.resume)
+        initial_results = prev.to_dict("records")
+        args.start_idx = len(initial_results)
+        m = re.search(r"_(\d{8}_\d{6})(?:_partial)?\.csv$", args.resume)
+        if m:
+            timestamp = m.group(1)
+    if args.start_idx > 0:
+        samples = samples[args.start_idx:]
+
+    print(f">>> Config:  {args.config}")
+    print(f">>> Method:  {METHOD_NAME}")
     print(f">>> Dataset: {conf['dataset']}")
     print(f">>> Samples: {len(samples)} (start_idx={args.start_idx})")
 
     try:
-        clients, resolved_envs = _build_clients(conf, method)
+        clients, resolved = _build_clients(conf)
     except ValueError as exc:
         print(f"[Error] {exc}")
         return 1
     print(f">>> LLM provider: {llm_provider(conf)}")
-    for role, env_name in resolved_envs.items():
-        print(f">>> {role.title()} API key env: {env_name}")
+    for role, env in resolved.items():
+        print(f">>> {role.title()} API key env: {env}")
 
     try:
         results = asyncio.run(
             process_samples(
-                clients,
-                samples,
-                conf,
-                timestamp,
-                method,
+                clients, samples, conf, timestamp,
                 initial_results=initial_results,
                 start_idx=args.start_idx,
             )
         )
     except QuotaExceededError as exc:
         print(f"[Stopped] {exc}")
-        print(f"[Resume] Partial results: {result_path(conf, timestamp, partial=True)}")
+        print(f"[Resume]  Partial results: {result_path(conf, timestamp, partial=True)}")
         return 1
 
     path, _, hit_rate, valid_ratio, valid_hit_rate, valid_count = save_results(
         results, conf, timestamp, partial=False
     )
-    partial_path = result_path(conf, timestamp, partial=True)
-    if os.path.exists(partial_path):
-        os.remove(partial_path)
-    print("-" * 30)
-    print(f"Saved to: {path}")
-    print(f"Overall Hit Rate: {hit_rate:.4f}")
-    print(f"Valid-Only Hit Rate: {valid_hit_rate:.4f} (from {valid_count} valid samples)")
-    print(f"Valid Ratio: {valid_ratio:.4f}")
-    print("-" * 30)
+    partial = result_path(conf, timestamp, partial=True)
+    if os.path.exists(partial):
+        os.remove(partial)
+    print("-" * 40)
+    print(f"Saved to:           {path}")
+    print(f"Overall Hit Rate:   {hit_rate:.4f}")
+    print(f"Valid-Only Hit Rate:{valid_hit_rate:.4f}  ({valid_count} valid samples)")
+    print(f"Valid Ratio:        {valid_ratio:.4f}")
+    print("-" * 40)
     return 0
 
 

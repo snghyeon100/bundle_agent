@@ -1,76 +1,43 @@
 # Dataset
-dataset: pog                   # pog | pog_dense | spotify | spotify_sparse
+dataset: pog_dense                   # pog | pog_dense | spotify | spotify_sparse
 data_path: ./datasets
 
 # Method
-method: simple_generate_evaluate_decide  # progressive_signal_discovery | simple_generate_evaluate_decide
+method: sem_agent              # sem_agent | baseline | candidate_reasoning
 
 # Evaluation
 num_cans: 10                  # candidates including the answer
 num_token: 5                  # max partial-bundle items (-1 = no limit)
-toy_eval: 1                 # -1 = full test set | N = first N samples
+toy_eval: 20                   # -1 = full test set | N = first N samples
 seed: 45                      # negative-candidate sampling seed
 shuffle_seed: 41              # partial-item order seed
 
 # LLM
-llm_provider: openai          # gemini | openai
-model: gpt-4.1
+llm_provider: gemini          # gemini | openai
+model: gemini-3.1-flash-lite
 temperature: 0.0
-openai_send_temperature: true
-openai_reasoning_effort: ""   # minimal | low | medium | high
+openai_send_temperature: false
+openai_reasoning_effort: minimal
 
-# Progressive Signal Discovery stage clients
-# Empty values fall back to an earlier stage key, then the provider default.
-psd_planning_api_key_env: "GEMINI_API_KEY_1"
-psd_code_api_key_env: "GEMINI_API_KEY_2"
-psd_diagnosis_api_key_env: "GEMINI_API_KEY_3"
-psd_prediction_api_key_env: "GEMINI_API_KEY_4"
-
-# Simple Generate-Evaluate-Decide stage clients
-simple_signal_code_api_key_env: "OPENAI_API_KEY"
-simple_signal_prediction_api_key_env: "OPENAI_API_KEY"
+# Semantic Agent stage clients
+sem_stage1_api_key_env: "GEMINI_API_KEY_2"
+sem_stage2_api_key_env: "GEMINI_API_KEY_3"
+sem_prediction_api_key_env: "GEMINI_API_KEY_4"
 
 # Stage generation budgets
-psd_broad_planning_max_output_tokens: 1600
-psd_code_max_output_tokens: 4000
-psd_diagnosis_max_output_tokens: 1800
-psd_deep_planning_max_output_tokens: 2400
-psd_prediction_max_output_tokens: 1200
-simple_signal_code_max_output_tokens: 4000
-simple_signal_prediction_max_output_tokens: 200
-
-# Adaptive discovery loop
-psd_max_deep_rounds: 1
-psd_code_max_repair_attempts: 1
-psd_current_bundle_train_context_policy: allow  # allow | exclude
-
-# Simple signal-generation refinement
-# Number of graph-guided multi-hop rounds after the initial broad signal scan.
-simple_signal_max_refinement_rounds: 1
-simple_signal_code_max_repair_attempts: 1
-simple_signal_max_evidence_chars: 30000
-simple_signal_current_bundle_train_context_policy: allow  # allow | exclude
+sem_stage1_max_output_tokens: 4000
+sem_stage2_max_output_tokens: 2000
+sem_prediction_max_output_tokens: 200
 
 # Generated-code workspace and safety
-psd_workspace_root: ./agent_workspaces
-psd_code_timeout_seconds: 45
-psd_code_max_stdout_chars: 24000
-psd_code_max_stderr_chars: 10000
-psd_enable_code_guard: true
-psd_allowed_files:
-  - count.json
-  - item_info.json
-  - bi_train.txt
-  - ui_full.txt
-  - content_feature.pt
-  - description_feature.pt
-
-simple_signal_workspace_root: ./agent_workspaces
-simple_signal_code_timeout_seconds: 45
-simple_signal_code_max_stdout_chars: 24000
-simple_signal_code_max_stderr_chars: 10000
-simple_signal_enable_code_guard: true
-simple_signal_allowed_files:
+sem_workspace_root: ./agent_workspaces
+sem_code_timeout_seconds: 45
+sem_code_max_stdout_chars: 24000
+sem_code_max_stderr_chars: 10000
+sem_enable_code_guard: true
+sem_max_evidence_chars: 30000
+sem_current_bundle_train_context_policy: allow  # allow | exclude
+sem_allowed_files:
   - count.json
   - item_info.json
   - bi_train.txt

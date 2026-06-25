@@ -238,7 +238,7 @@ async def _generate_execute_repair(
     labels,
     affordance_graph=None,
 ):
-    max_tokens_key = "sem_code_max_output_tokens"
+    max_tokens_key = "sem_stage1_max_output_tokens"
     default_tokens = 4000
     stage_label = f"sem stage{stage_index + 1}"
     require_rpath = stage_index > 0
@@ -409,7 +409,7 @@ async def run_sem_agent(
         case_view=case_view,
         source_manifest=source_manifest,
         initial_prompt=s1_prompt,
-        client=clients["code"],
+        client=clients["stage1"],
         conf=conf,
         generate_content_fn=generate_content_fn,
         workspace=workspace,
@@ -419,6 +419,7 @@ async def run_sem_agent(
     )
 
     stage1_evidence = s1_result["accepted_evidence"] or {"signals": []}
+    print(f"  [Bundle {sample['bundle_id']}] Stage 1 (Data Retrieval) completed.")
 
     # ------------------------------------------------------------------
     # Stage 2: Bundle Context & Candidate Fit
@@ -434,10 +435,10 @@ async def run_sem_agent(
 
     s2_raw = await _call_stage(
         generate_content_fn,
-        clients["code"],
+        clients["stage2"],
         conf,
         s2_prompt,
-        "sem_code_max_output_tokens",
+        "sem_stage2_max_output_tokens",
         4000,
         "sem stage2 reasoning",
     )
@@ -455,6 +456,7 @@ async def run_sem_agent(
 
     # Merge Stage 1 + Stage 2 evidence; Stage 2 wins on name conflicts
     final_evidence = merge_evidence(stage1_evidence, stage2_evidence)
+    print(f"  [Bundle {sample['bundle_id']}] Stage 2 (Pure Reasoning) completed.")
 
     # ------------------------------------------------------------------
     # Decision

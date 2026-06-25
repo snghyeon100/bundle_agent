@@ -105,7 +105,8 @@ def stage1_ecosystem_prompt(
         "Question: Which other items from the available sources help explain each "
         "target item?\n"
         "Investigate: For each target item, search for supporting items through any "
-        "available source-composition path.\n"
+        "available source-composition path. Supporting items may come from co-bundles, "
+        "shared users, category anchors, or visual/textual/UI/BI LightGCN embedding neighbors.\n"
         "Output intent: For each target item, collect a list of supporting item titles "
         "and the paths that found them into the `evidence` array. Do NOT write long "
         "narratives or analysis in the `value` string; simply output a static string like "
@@ -154,7 +155,7 @@ def stage1_ecosystem_prompt(
         "- You are FREE to choose any traversal paths through the available sources "
         "to implement this task. The task is a semantic target, not an algorithmic "
         "prescription.\n"
-        "- Treat the listed sources as a relation graph, not as isolated files.\n"
+        "- Treat the listed sources as a relation graph, not as isolated files. You can compose relations to retrieve supporting items through multi-hop paths.\n"
         "- Include `relation_path` listing the typed hops your code actually executes.\n"
     )
 
@@ -502,7 +503,7 @@ def decision_prompt(decision_case, evidence):
         f"You are a helpful and honest assistant. The following are multiple choice questions about {task_name}. "
         "You should directly answer the question by choosing the letter of the correct option. Only provide the letter "
         "of your answer, without any explanation or mentioning the option content.\n"
-        f"{pog_guidance}"
+        #f"{pog_guidance}"
         f"Question: Given the partial {bundle_name}: {input_str}, which candidate {item_name} should be included into this "
         f"{bundle_name}?\n"
         f"{partial_context}"
