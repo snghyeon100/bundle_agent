@@ -94,7 +94,7 @@ _DATASET_OVERRIDES = {
             "fields": {
                 "id": "external product identifier; not the canonical integer item_id",
                 "cate": "category identifier",
-                "pic": "item image URL",
+                #"pic": "item image URL",
                 "title": "item title text",
             },
         },
@@ -104,10 +104,10 @@ _DATASET_OVERRIDES = {
             "expected_shape": ["#I", 768],
             "row_alignment": "tensor row index equals canonical integer item_id",
             "normalization": "not recorded; inspect norms before assuming unit normalization",
-            "cross_file_comparability": (
-                "Do not assume direct comparability with description_feature.pt unless "
-                "the aligned BLIP image-text provenance is independently confirmed."
-            ),
+            #"cross_file_comparability": (
+            #    "Do not assume direct comparability with description_feature.pt unless "
+            #    "the aligned BLIP image-text provenance is independently confirmed."
+            #),
         },
         "description_feature.pt": {
             "modality": "text",
@@ -115,10 +115,10 @@ _DATASET_OVERRIDES = {
             "expected_shape": ["#I", 768],
             "row_alignment": "tensor row index equals canonical integer item_id",
             "normalization": "not recorded; inspect norms before assuming unit normalization",
-            "cross_file_comparability": (
-                "Do not assume direct comparability with content_feature.pt unless "
-                "aligned image-text provenance is independently confirmed."
-            ),
+            #"cross_file_comparability": (
+            #    "Do not assume direct comparability with content_feature.pt unless "
+            #    "aligned image-text provenance is independently confirmed."
+            #),
         },
     },
     "pog_dense": {
@@ -127,7 +127,6 @@ _DATASET_OVERRIDES = {
             "fields": {
                 "id": "external product identifier; not the canonical integer item_id",
                 "cate_id": "category identifier",
-                "pic_url": "item image URL",
                 "title": "item title text",
             },
         },
@@ -137,10 +136,7 @@ _DATASET_OVERRIDES = {
             "expected_shape": ["#I", 768],
             "row_alignment": "tensor row index equals canonical integer item_id",
             "normalization": "not recorded; inspect norms before assuming unit normalization",
-            "cross_file_comparability": (
-                "Do not assume direct comparability with description_feature.pt unless "
-                "the aligned BLIP image-text provenance is independently confirmed."
-            ),
+            
         },
         "description_feature.pt": {
             "modality": "text",
@@ -148,10 +144,7 @@ _DATASET_OVERRIDES = {
             "expected_shape": ["#I", 768],
             "row_alignment": "tensor row index equals canonical integer item_id",
             "normalization": "not recorded; inspect norms before assuming unit normalization",
-            "cross_file_comparability": (
-                "Do not assume direct comparability with content_feature.pt unless "
-                "aligned image-text provenance is independently confirmed."
-            ),
+            
         },
     },
     "spotify": {

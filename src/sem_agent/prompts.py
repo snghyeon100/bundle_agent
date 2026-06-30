@@ -10,8 +10,7 @@ Stage 2 — Bundle Context & Candidate Fit:
     bundle-level context, then explains how each candidate's expanded evidence
     fits or conflicts with that context.
 
-Both stages output ONLY string narratives in the `value` field; numeric values
-are forbidden so the decision model cannot fall back to number comparison.
+Stage 1 stores only evidence strings. Stage 2 stores only summary strings.
 """
 
 import json
@@ -23,6 +22,46 @@ from .common import candidate_labels, task_semantics
 
 def _dump(value):
     return json.dumps(value, ensure_ascii=False, indent=2, default=str)
+
+
+def _unified_case_context(case_view, semantic_case=None):
+    unified = {
+        "case_id": case_view.get("case_id"),
+        "dataset": case_view.get("dataset"),
+        "bundle_id": case_view.get("bundle_id"),
+        "partial_items": [],
+        "candidates": [],
+    }
+    semantic_case = semantic_case or {}
+    semantic_partials = {
+        int(item.get("item_id")): item
+        for item in semantic_case.get("partial_items", [])
+        if isinstance(item, dict) and item.get("item_id") is not None
+    }
+    semantic_candidates = {
+        str(item.get("label", "")): item
+        for item in semantic_case.get("candidates", [])
+        if isinstance(item, dict)
+    }
+    for item_id in case_view.get("partial_item_ids", []):
+        semantic_item = semantic_partials.get(int(item_id), {})
+        entry = {"item_id": int(item_id)}
+        if semantic_item:
+            entry["text"] = semantic_item.get("text", "")
+            if semantic_item.get("metadata"):
+                entry["metadata"] = semantic_item.get("metadata")
+        unified["partial_items"].append(entry)
+    for candidate in case_view.get("candidates", []):
+        label = str(candidate.get("label", ""))
+        item_id = int(candidate.get("item_id"))
+        semantic_item = semantic_candidates.get(label, {})
+        entry = {"label": label, "item_id": item_id}
+        if semantic_item:
+            entry["text"] = semantic_item.get("text", "")
+            if semantic_item.get("metadata"):
+                entry["metadata"] = semantic_item.get("metadata")
+        unified["candidates"].append(entry)
+    return unified
 
 
 
@@ -47,49 +86,78 @@ def stage1_ecosystem_prompt(
     labels = ", ".join(candidate_labels(case_view))
 
     semantic_goals = (
-        "STAGE 1 TASK — Unified Item Evidence Expansion\n"
-        "For every target item in the case, including partial item(s) and candidate "
-        "items, retrieve supporting or neighboring items from the available source "
-        "relation graph using the same evidence-expansion logic.\n\n"
+        "STAGE 1 TASK - Sample-Adaptive Evidence Program Synthesis\n"
+        "Generate executable Python code that performs sample-adaptive evidence retrieval "
+        "for this specific bundle-completion instance. Your code should adapt both "
+        "(1) which source paths are used and (2) how evidence from those paths is represented. "
+        "This stage retrieves and formats source-grounded evidence only; it must not make "
+        "candidate-fit judgments or choose an answer.\n\n"
 
-        "Question: Which other items from the available sources help explain each "
-        "target item?\n"
-        "Investigate: For each target item, search for supporting items through any "
-        "available source-composition path. Supporting items may come from co-bundles, "
-        "shared users, category anchors, or visual/textual/UI/BI LightGCN embedding neighbors.\n"
-        "Output intent: For each target item, collect a list of supporting item titles "
-        "and the paths that found them into the `evidence` array. Do NOT write long "
-        "narratives or analysis in the `value` string; simply output a static string like "
-        "'Extracted N supporting items'. This stage is strictly for data retrieval.\n\n"
+        "AVAILABLE RETRIEVAL OPERATORS\n"
+        "Use these operators as a library, not as a fixed checklist. You are not required "
+        "to use every operator.\n"
+        "1. Co-bundle expansion: use bundle-item data to follow item -> historical bundle -> "
+        "other items in the same bundle. This is direct bundle-context evidence but may be sparse.\n"
+        "2. Shared-user expansion: use user-item data to follow item -> users -> other items "
+        "interacted by those users. This can reveal user/style context but may be noisy or high-fanout.\n"
+        "3. Category/metadata anchor expansion: use item metadata to find same or related "
+        "category anchors. This grounds item type/style but is not direct compatibility evidence.\n"
+        "4. Representation-neighbor expansion: use image, text, content, UI-LightGCN, BI-LightGCN, "
+        "or CF features to retrieve nearest-neighbor items. This is useful as a sparse-evidence fallback, "
+        "but may retrieve substitutes rather than complementary items.\n"
+        "5. Cross-source composition: when useful, compose relations such as item -> bundle -> "
+        "co-item -> metadata, item -> user -> interacted item -> bundle, or item -> embedding "
+        "neighbor -> metadata/category.\n\n"
+
+        "SAMPLE-ADAPTIVE POLICY\n"
+        "First infer a compact sample-level base retrieval policy from the partial item text, "
+        "candidate item texts, source availability, item roles, and evidence sparsity. Apply this "
+        "base policy to every candidate for comparability. Candidate-specific fallback paths are "
+        "allowed only when the base policy returns sparse or empty evidence for that candidate, "
+        "or when the candidate's item role makes the base operator insufficient for neutral item "
+        "profiling. Do not use deeper retrieval for a candidate because it appears more compatible "
+        "with the partial bundle.\n\n"
+
+        "SAMPLE-ADAPTIVE EVIDENCE VIEWS\n"
+        "Adaptiveness also applies to evidence representation. Your code may compute "
+        "sample-relevant evidence views from selected sources, such as grouped examples, "
+        "category/role concentration, source sparsity, broad-source warnings, source agreement "
+        "or disagreement, high-fanout-filtered contexts, or representative anchors. Use statistics "
+        "inside the code to decide what is representative, but output compact qualitative evidence "
+        "strings rather than bare numeric scores.\n\n"
+
+        "EVIDENCE STRING RULES\n"
+        "For every target item, output evidence strings grounded in retrieved item titles or metadata. "
+        "Every evidence string must disclose its path/view in the prefix before ':', for example "
+        "'base co-bundle profile via bundle 11186: item title 1; item title 2', "
+        "'fallback text-neighbor profile: item title 1; item title 2', or "
+        "'sparse co-bundle evidence: no historical co-bundle items found'. "
+        "Group evidence by retrieval signal, view, or anchor. For each evidence string/group, include "
+        "at most 5 representative item titles. For high-fanout groups, append a compact note such as "
+        "'(+1432 more items not shown)'.\n\n"
+
+        "Do not output `value`, `description`, `sources`, `relation_path`, raw scores, "
+        "rankings, predictions, fit judgments, or final recommendations. Stage 1 output should "
+        "keep only `signal_scope` and evidence arrays.\n\n"
 
         "STAGE 1 OUTPUT STRUCTURE\n"
-        "Produce JSON with at least the following two signal shapes:\n"
+        "Produce JSON with exactly these two signal shapes:\n"
         "{\n"
         '  "signals": [\n'
         "    {\n"
-        '      "signal_name": "partial_item_evidence_expansion",\n'
         '      "signal_scope": "partial_bundle",\n'
-        '      "description": "supporting items retrieved for the partial item(s)",\n'
-        '      "sources": ["source filename(s) used"],\n'
-        '      "relation_path": ["typed hop actually used"],\n'
         '      "observation": {\n'
-        '        "value": "Extracted N supporting items.",\n'
         '        "evidence": [\n'
-        '          "Path name: item title (brief rationale)"\n'
+        '          "Path or anchor name: item title 1; item title 2; item title 3"\n'
         "        ]\n"
         "      }\n"
         "    },\n"
         "    {\n"
-        '      "signal_name": "candidate_item_evidence_expansion",\n'
         '      "signal_scope": "candidate",\n'
-        '      "description": "supporting items retrieved for each candidate item",\n'
-        '      "sources": ["source filename(s) used"],\n'
-        '      "relation_path": ["typed hop actually used"],\n'
         '      "candidate_observations": {\n'
         '        "A": {\n'
-        '          "value": "Extracted N supporting items.",\n'
         '          "evidence": [\n'
-        '            "Path name: item title (brief rationale)"\n'
+        '            "Path or anchor name: item title 1; item title 2; item title 3"\n'
         "          ]\n"
         "        }\n"
         "      }\n"
@@ -97,7 +165,7 @@ def stage1_ecosystem_prompt(
         "  ]\n"
         "}\n"
         "For every evidence string, the prefix before ':' must describe the actual "
-        "retrieval path or rationale used by the generated code.\n"
+        "retrieval path, source signal, or anchor used by the generated code.\n"
         "Do not write detailed narratives, fit judgments, rankings, "
         "predictions, or final recommendations in Stage 1.\n\n"
 
@@ -106,19 +174,22 @@ def stage1_ecosystem_prompt(
         "to implement this task. The task is a semantic target, not an algorithmic "
         "prescription.\n"
         "- Treat the listed sources as a relation graph, not as isolated files. You can compose relations to retrieve supporting items through multi-hop paths.\n"
-        "- Include `relation_path` listing the typed hops your code actually executes.\n"
+        "- CPU-only: load every .pt file with torch.load(..., map_location=\"cpu\"). "
+        "If a tensor requires gradients, call detach() before numpy().\n"
+        "- Keep numpy arrays as numpy arrays while using numpy attributes such as `.size`, "
+        "`.shape`, or boolean indexing. If you convert an array to a Python list, use "
+        "`len(list_value)` instead of `.size` and do not call `.tolist()` on it again.\n"
     )
 
     return (
-        "You are the Stage 1 Item Evidence Expansion Code Generator in a bundle-completion system.\n"
+        "You are the Stage 1 Sample-Adaptive Evidence Retrieval Code Generator in a bundle-completion system.\n"
         "Generate ONLY complete executable Python code — no markdown fences, no explanation.\n"
         "The script runs with the allowed workspace as its current directory.\n\n"
         f"{task_semantics(case_view['dataset'])}\n\n"
         f"{semantic_goals}\n"
         #f"{_shared_rules(output_file, labels, max_evidence_chars)}\n"
-        f"ID-only case:\n{_dump(case_view)}\n\n"
-        f"Text-enriched case context:\n{_dump(semantic_case or {})}\n\n"
-        "Use the text-enriched context as semantic context for interpreting items, "
+        f"Unified case context (IDs and text together):\n{_dump(_unified_case_context(case_view, semantic_case))}\n\n"
+        "Use the item text as semantic context for interpreting items, "
         "but ground every signal in the listed workspace sources. Do not rely on "
         "item text alone for final evidence.\n\n"
         f"Source Capability Manifest:\n{_dump(source_manifest)}"
@@ -151,8 +222,6 @@ def stage2_gap_prompt(
             obs = sig.get("observation")
             if isinstance(obs, dict):
                 partial_evidence.append({
-                    "signal_name": sig.get("signal_name"),
-                    "value": obs.get("value"),
                     "evidence": obs.get("evidence")
                 })
 
@@ -167,8 +236,6 @@ def stage2_gap_prompt(
                     if lbl not in cand_evidence_by_label:
                         cand_evidence_by_label[lbl] = []
                     cand_evidence_by_label[lbl].append({
-                        "signal_name": sig.get("signal_name"),
-                        "value": obs.get("value"),
                         "evidence": obs.get("evidence")
                     })
 
@@ -177,7 +244,6 @@ def stage2_gap_prompt(
         "dataset": case_view.get("dataset"),
         "bundle_id": case_view.get("bundle_id"),
         "partial_items": [],
-        "partial_bundle_evidence": partial_evidence,
         "candidates": []
     }
 
@@ -185,7 +251,8 @@ def stage2_gap_prompt(
         for item in semantic_case.get("partial_items", []):
             unified_case["partial_items"].append({
                 "item_id": item.get("item_id"),
-                "text": item.get("text", "")
+                "text": item.get("text", ""),
+                "stage1_evidence": partial_evidence,
             })
         for cand in semantic_case.get("candidates", []):
             lbl = str(cand.get("label", ""))
@@ -196,7 +263,10 @@ def stage2_gap_prompt(
                 "stage1_evidence": cand_evidence_by_label.get(lbl, [])
             })
     else:
-        unified_case["partial_items"] = case_view.get("partial_item_ids", [])
+        unified_case["partial_items"] = [
+            {"item_id": item_id, "stage1_evidence": partial_evidence}
+            for item_id in case_view.get("partial_item_ids", [])
+        ]
         for cand in case_view.get("candidates", []):
             lbl = str(cand.get("label", ""))
             unified_case["candidates"].append({
@@ -205,7 +275,7 @@ def stage2_gap_prompt(
                 "stage1_evidence": cand_evidence_by_label.get(lbl, [])
             })
 
-    semantic_goals = (
+    legacy_stage2_fit_goals = (
         "Stage 1 has already expanded every partial item and candidate item into "
         "supporting items retrieved from the source relation graph. This evidence "
         "is attached directly to the partial bundle and each candidate in the Unified Case below. "
@@ -266,13 +336,59 @@ def stage2_gap_prompt(
         "Use Stage 1 candidate supporting evidence as anchors for candidate-fit analysis.\n"
     )
 
+    semantic_goals = (
+        "Stage 1 has already expanded every partial item and candidate item into "
+        "supporting items retrieved from the source relation graph. In the Unified Case below, "
+        "each item has its text placed next to its Stage 1 evidence. Your task is to build "
+        "bundle-completion-aware item profiles, not fit judgments or candidate selections.\n\n"
+        "GOAL 1 - Partial Bundle Item Profile (required)\n"
+        "  Profile the partial bundle item(s) using the item text and attached Stage 1 evidence. "
+        "Describe the observed item role(s), visible/style attributes, occasion or season cues, "
+        "bundle-relevant category/role context, and uncertainty. Do not name a missing item type "
+        "as the answer and do not recommend any candidate.\n\n"
+        "GOAL 2 - Candidate Item Profiles (required)\n"
+        "  For each candidate, profile only that candidate's item text and attached Stage 1 evidence. "
+        "Describe the item's likely outfit role, style attributes, occasion or season cues, "
+        "bundle-relevant category/role context, and mixed or sparse evidence. "
+        "Do not compare candidates to each other. Do not describe whether a candidate fits the partial bundle.\n\n"
+        "STRICT NEUTRALITY RULES\n"
+        "- Do not rank candidates or choose a winner.\n"
+        "- Do not use phrases such as strong fit, weak fit, fits well, best, worse, should be selected, "
+        "more aligned, less aligned, likely correct, or final answer.\n"
+        "- Do not output `value`, `evidence`, `observation`, or `candidate_observations` in Stage 2. "
+        "Output one summary string for the partial bundle and one summary string per candidate.\n\n"
+        "STAGE 2 OUTPUT STRUCTURE\n"
+        "Produce JSON with exactly the following two signal shapes:\n"
+        "```json\n"
+        "{\n"
+        '  "signals": [\n'
+        "    {\n"
+        '      "signal_name": "partial_bundle_item_summary",\n'
+        '      "signal_scope": "partial_bundle",\n'
+        '      "description": "bundle-completion-aware neutral item profile of the partial bundle and its Stage 1 evidence",\n'
+        '      "summary": "partial bundle item profile using item text and Stage 1 evidence"\n'
+        "    },\n"
+        "    {\n"
+        '      "signal_name": "candidate_item_summaries",\n'
+        '      "signal_scope": "candidate",\n'
+        '      "description": "bundle-completion-aware neutral item profiles for each candidate and its Stage 1 evidence",\n'
+        '      "candidate_summaries": {\n'
+        '        "A": "candidate A item profile using item text and Stage 1 evidence",\n'
+        '        "B": "candidate B item profile using item text and Stage 1 evidence"\n'
+        "      }\n"
+        "    }\n"
+        "  ]\n"
+        "}\n"
+        "```\n"
+        f"Include every candidate label in `candidate_summaries`: {labels}.\n"
+    )
+
     return (
-        "You are the Stage 2 Bundle Context & Candidate Fit Reasoner in a bundle-completion system.\n"
-        "Your task is to analyze the provided Unified Case and output a JSON response containing your analysis.\n\n"
+        "You are the Stage 2 Bundle-Completion-Aware Item Profiler in a bundle-completion system.\n"
+        "Your task is to compress item text and Stage 1 evidence into neutral item profiles.\n\n"
         f"{task_semantics(case_view['dataset'])}\n\n"
         f"{semantic_goals}\n"
-        #f"{_stage2_rules(labels)}\n"
-        f"Unified Case (ID, text, and Stage 1 evidence):\n{_dump(unified_case)}\n"
+        f"Unified Case (each item has text next to its Stage 1 evidence):\n{_dump(unified_case)}\n"
     )
 
 
@@ -292,44 +408,44 @@ def repair_prompt(
     relation_path_rule = ""
     if require_relation_path:
         relation_path_rule = (
-            " Every signal must retain `relation_path` with at least two non-empty "
-            "typed transitions the repaired code actually executes."
+            ""
         )
-            )
 
     return (
         "You are repairing Python signal-extraction code. Return ONLY complete executable "
         "Python code — no markdown fences, no explanation.\n"
-        "Fix execution errors, JSON schema defects, or value-format violations. "
+        "Fix execution errors or JSON schema defects. "
         "Preserve the original semantic investigation intent.\n"
         "CPU-only: torch.load(..., map_location=\"cpu\").\n\n"
         f"Script must write UTF-8 JSON to exactly: {output_file}\n"
         f"Required candidate labels for every candidate-scoped signal: {labels}\n\n"
         "CRITICAL: `signal_scope` must be either `partial_bundle` or `candidate`. "
-        "For `partial_bundle`, use one shared `observation`. For `candidate`, use "
-        "`candidate_observations` with every required candidate label. Every `value` "
-        f"must be a non-empty STRING narrative. A bare number is not acceptable.{relation_path_rule}\n\n"
+        "For `partial_bundle`, use one shared `observation` containing only `evidence`. "
+        "For `candidate`, use `candidate_observations` with every required candidate label, "
+        "and each label object must contain only `evidence`. Do not output `value`, "
+        "`description`, `sources`, `relation_path`, scores, rankings, or explanations. Evidence "
+        f"strings should preserve the sample-adaptive retrieval intent and may describe "
+        f"compact evidence views such as base paths, fallback paths, sparsity, source agreement, "
+        f"or grouped representative anchors. Group items by the same retrieval path or view, such as "
+        f"`base co-bundle profile via bundle 11186: item title 1; item title 2`. For high-fanout groups, "
+        f"include up to 5 representative titles and append a count such as "
+        f"`(+1432 more items not shown)`.{relation_path_rule}\n\n"
         "Preserve this exact schema. Include `observation` only for partial_bundle "
         "signals, and include `candidate_observations` only for candidate signals:\n"
         "{\n"
         '  "signals": [\n'
         "    {\n"
-        '      "signal_name": "...",\n'
         '      "signal_scope": "partial_bundle | candidate",\n'
-        '      "description": "...",\n'
-        '      "sources": ["..."],\n'
-        '      "relation_path": ["hop1", "hop2"],\n'
-        '      "observation": {"value": "shared partial-bundle narrative", "evidence": ["..."]},\n'
+        '      "observation": {"evidence": ["..."]},\n'
         '      "candidate_observations": {\n'
-        '        "A": {"value": "narrative string", "evidence": ["..."]}\n'
+        '        "A": {"evidence": ["..."]}\n'
         "      }\n"
         "    }\n"
         "  ]\n"
         "}\n\n"
         f"ID-only case:\n{_dump(case_view)}\n\n"
         f"Source Capability Manifest:\n{_dump(source_manifest)}\n\n"
-        f"Execution context and defects:\n{_dump(execution_context)}"
-        f"{graph_block}\n\n"
+        f"Execution context and defects:\n{_dump(execution_context)}\n\n"
         f"Previous code:\n{previous_code}"
     )
 
@@ -348,21 +464,8 @@ def _compact(value):
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
 
 
-def _signal_line(signal, observation, indent="   - "):
-    signal_name = str(signal.get("signal_name", "unnamed_signal"))
-    sources = signal.get("sources", [])
-    source_text = ", ".join(str(s) for s in sources) if isinstance(sources, list) else str(sources)
-    relation_path = signal.get("relation_path", [])
-    path_text = (
-        " -> ".join(str(t) for t in relation_path)
-        if isinstance(relation_path, list) and relation_path
-        else ""
-    )
-    value_text = _compact(observation.get("value"))
-    facts = observation.get("evidence", [])
-    fact_text = _compact(facts) if isinstance(facts, list) and facts else "[]"
-    path_suffix = f"; path={path_text}" if path_text else ""
-    return f"{indent}{signal_name} [sources: {source_text}]: value={value_text}; evidence={fact_text}{path_suffix}"
+def _summary_text(value):
+    return " ".join(str(value or "").split())
 
 
 def _partial_evidence_lines(evidence):
@@ -373,9 +476,11 @@ def _partial_evidence_lines(evidence):
             continue
         if str(signal.get("signal_scope", "")).strip() != "partial_bundle":
             continue
-        observation = signal.get("observation")
-        if isinstance(observation, dict):
-            lines.append(_signal_line(signal, observation, indent=" - "))
+        summary = _summary_text(signal.get("summary"))
+        if not summary and isinstance(signal.get("observation"), dict):
+            summary = _summary_text(signal["observation"].get("value"))
+        if summary:
+            lines.append(f" - {summary}")
     return lines
 
 
@@ -388,11 +493,16 @@ def _candidate_evidence_lines(evidence, label):
         scope = str(signal.get("signal_scope", "candidate")).strip()
         if scope == "partial_bundle":
             continue
-        observations = signal.get("candidate_observations", {})
-        observation = observations.get(label) if isinstance(observations, dict) else None
-        if not isinstance(observation, dict):
-            continue
-        lines.append(_signal_line(signal, observation))
+        summaries = signal.get("candidate_summaries", {})
+        summary = summaries.get(label) if isinstance(summaries, dict) else ""
+        if not summary:
+            observations = signal.get("candidate_observations", {})
+            observation = observations.get(label) if isinstance(observations, dict) else None
+            if isinstance(observation, dict):
+                summary = observation.get("value", "")
+        summary = _summary_text(summary)
+        if summary:
+            lines.append(f"   Stage 2 summary: {summary}")
     return lines
 
 
@@ -408,15 +518,12 @@ def decision_prompt(decision_case, evidence):
     for candidate in decision_case.get("candidates", []):
         label = str(candidate.get("label", ""))
         block = [f"{label}. {candidate.get('text', '')}"]
-        evidence_lines = _candidate_evidence_lines(evidence, label)
-        if evidence_lines:
-            block.append("   Evidence:")
-            block.extend(evidence_lines)
+        block.extend(_candidate_evidence_lines(evidence, label))
         option_blocks.append("\n".join(block))
     target_str = "\n".join(option_blocks)
     partial_context = ""
     if partial_lines:
-        partial_context = "Shared partial-bundle evidence:\n" + "\n".join(partial_lines) + "\n"
+        partial_context = "Shared partial-bundle context:\n" + "\n".join(partial_lines) + "\n"
 
     dataset_name = str(decision_case.get("dataset", "")).lower()
     pog_guidance = ""

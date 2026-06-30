@@ -3,13 +3,13 @@
 # ============================================================
 
 # Dataset
-dataset: pog_dense                   # pog | pog_dense | spotify | spotify_sparse
+dataset: pog                   # pog | pog_dense | spotify | spotify_sparse
 data_path: ./datasets
 
 # Evaluation
 num_cans: 10                   # number of candidates (including answer)
 num_token: 5                   # max partial-bundle items (-1 = no limit)
-toy_eval: 1                    # -1 = full test set | N = first N samples
+toy_eval: 2                    # -1 = full test set | N = first N samples
 seed: 45
 shuffle_seed: 41
 
@@ -28,11 +28,13 @@ sem_prediction_api_key_env: "GEMINI_API_KEY_4"
 
 # Token budgets
 sem_code_max_output_tokens: 4000
+sem_stage1_max_output_tokens: 6000
+sem_stage2_max_output_tokens: 12000
 sem_prediction_max_output_tokens: 200
 
 # Repair and evidence settings
 sem_code_max_repair_attempts: 2
-sem_max_evidence_chars: 20000
+sem_max_evidence_chars: 100000
 
 # Train context policy
 sem_current_bundle_train_context_policy: allow  # allow | exclude

@@ -14,10 +14,9 @@ SRC_DIR = os.path.join(REPO_ROOT, "src")
 sys.path.insert(0, SRC_DIR)
 
 from dataset import BundleZeroShotDataset, set_seed
-from main_sem import _build_clients, generate_content_with_retry
-from sem_agent.affordance_graph import build_evidence_affordance_graph
-from sem_agent.common import build_case_view, candidate_labels, compact_json
-from sem_agent.pipeline import _call_stage, build_decision_case, parse_json_from_text
+from main import _build_clients, generate_content_with_retry
+from sem_agent.common import build_case_view, candidate_labels, compact_json, parse_json_from_text
+from sem_agent.pipeline import _call_stage, build_decision_case, validate_stage2_summary_evidence
 from sem_agent.prompts import stage2_gap_prompt
 from sem_agent.workspace import build_source_manifest, prepare_workspace
 
@@ -198,12 +197,11 @@ async def run_stage2_only(
     log(f"      available files: {', '.join(workspace_files) if workspace_files else '(none)'}")
     log(f"      copied files this run: {len(copied_files)}")
 
-    log("[4/8] Building source manifest and affordance graph")
+    log("[4/8] Building source manifest")
     source_manifest = build_source_manifest(
         workspace,
         str(conf.get("sem_current_bundle_train_context_policy", "allow")),
     )
-    affordance_graph = build_evidence_affordance_graph(source_manifest, conf["dataset"])
     max_chars = int(conf.get("sem_max_evidence_chars", 30000))
     log(f"      manifest sources: {len(source_manifest.get('sources', []))}")
     log(f"      max evidence chars: {max_chars}")
@@ -213,7 +211,6 @@ async def run_stage2_only(
     prompt = stage2_gap_prompt(
         case_view,
         source_manifest,
-        affordance_graph,
         output_file,
         max_chars,
         stage1_evidence=stage1_evidence,
@@ -230,23 +227,30 @@ async def run_stage2_only(
     log("[6/8] Generating Stage 2 pure reasoning response")
     s2_raw = await _call_stage(
         generate_content_with_progress,
-        clients["code"],
+        clients["stage2"],
         run_conf,
         prompt,
-        "sem_code_max_output_tokens",
+        "sem_stage2_max_output_tokens",
         4000,
         "sem stage2 reasoning",
     )
     
-    stage2_evidence = parse_json_from_text(s2_raw) or {"signals": []}
+    parsed_stage2 = parse_json_from_text(s2_raw)
+    stage2_issues = []
+    if not isinstance(parsed_stage2, dict):
+        stage2_issues.append("Stage 2 response was not parseable JSON.")
+        stage2_evidence = {"signals": []}
+    else:
+        stage2_evidence = parsed_stage2
+        stage2_issues.extend(validate_stage2_summary_evidence(stage2_evidence, labels))
     
     result = {
         "raw_response": s2_raw,
         "generated_code": "",
         "repairs": [],
         "execution_summary": {"msg": "pure reasoning, skipped execution"},
-        "validation_issues": [],
-        "accepted_evidence": stage2_evidence if "signals" in stage2_evidence else None,
+        "validation_issues": stage2_issues,
+        "accepted_evidence": stage2_evidence if not stage2_issues else None,
     }
     log("      reasoning finished")
 
@@ -356,7 +360,7 @@ def main():
         )
 
     clients, resolved_envs = _build_clients(conf)
-    print(f"Code API key env: {resolved_envs['code']}")
+    print(f"Stage 2 API key env: {resolved_envs['stage2']}")
 
     asyncio.run(
         run_stage2_only(

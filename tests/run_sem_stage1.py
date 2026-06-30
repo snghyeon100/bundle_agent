@@ -14,8 +14,7 @@ SRC_DIR = os.path.join(REPO_ROOT, "src")
 sys.path.insert(0, SRC_DIR)
 
 from dataset import BundleZeroShotDataset, set_seed
-from main_sem import _build_clients, generate_content_with_retry
-from sem_agent.affordance_graph import build_evidence_affordance_graph
+from main import _build_clients, generate_content_with_retry
 from sem_agent.common import build_case_view, candidate_labels, compact_json
 from sem_agent.pipeline import _generate_execute_repair, build_decision_case
 from sem_agent.prompts import stage1_ecosystem_prompt
@@ -95,14 +94,12 @@ async def run_stage1_only(conf, sample, clients, print_prompt=False, analysis_di
         workspace,
         str(conf.get("sem_current_bundle_train_context_policy", "allow")),
     )
-    affordance_graph = build_evidence_affordance_graph(source_manifest, conf["dataset"])
     max_chars = int(conf.get("sem_max_evidence_chars", 30000))
 
     output_file = f"output/test_sem_bundle{sample['bundle_id']}_stage1.json"
     prompt = stage1_ecosystem_prompt(
         case_view,
         source_manifest,
-        affordance_graph,
         output_file,
         max_chars,
         semantic_case=semantic_case,
@@ -119,13 +116,12 @@ async def run_stage1_only(conf, sample, clients, print_prompt=False, analysis_di
         case_view=case_view,
         source_manifest=source_manifest,
         initial_prompt=prompt,
-        client=clients["code"],
+        client=clients["stage1"],
         conf=run_conf,
         generate_content_fn=generate_content_with_retry,
         workspace=workspace,
         output_file=output_file,
         labels=labels,
-        affordance_graph=affordance_graph,
     )
 
     evidence = result["accepted_evidence"] or {"signals": []}
@@ -151,6 +147,9 @@ async def run_stage1_only(conf, sample, clients, print_prompt=False, analysis_di
     print(f"Analysis output: {analysis_paths['run_dir']}")
     print(f"Accepted: {result['accepted_evidence'] is not None}")
     print(f"Validation issues: {result['validation_issues']}")
+    summary = result.get("execution_summary", {})
+    if not result["accepted_evidence"]:
+        print(f"Execution summary: {compact_json(summary)}")
     print("\n[Stage 1 Evidence]")
     print(compact_json(evidence))
 
@@ -204,7 +203,7 @@ def main():
 
     sample = samples[args.bundle_index]
     clients, resolved_envs = _build_clients(conf)
-    print(f"Code API key env: {resolved_envs['code']}")
+    print(f"Stage 1 API key env: {resolved_envs['stage1']}")
 
     analysis_dir = args.analysis_dir
     if not os.path.isabs(analysis_dir):

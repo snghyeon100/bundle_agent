@@ -1,5 +1,5 @@
 # Dataset
-dataset: pog_dense                   # pog | pog_dense | spotify | spotify_sparse
+dataset: pog                   # pog | pog_dense | spotify | spotify_sparse
 data_path: ./datasets
 
 # Method
@@ -8,21 +8,21 @@ method: sem_agent              # sem_agent | baseline | candidate_reasoning
 # Evaluation
 num_cans: 10                  # candidates including the answer
 num_token: 5                  # max partial-bundle items (-1 = no limit)
-toy_eval: 20                   # -1 = full test set | N = first N samples
+toy_eval: 2                   # -1 = full test set | N = first N samples
 seed: 45                      # negative-candidate sampling seed
 shuffle_seed: 41              # partial-item order seed
 
 # LLM
-llm_provider: gemini          # gemini | openai
-model: gemini-3.1-flash-lite
+llm_provider: openai          # gemini | openai
+model: gpt-4.1
 temperature: 0.0
-openai_send_temperature: false
-openai_reasoning_effort: minimal
+openai_send_temperature: true
+openai_reasoning_effort: ""
 
 # Semantic Agent stage clients
-sem_stage1_api_key_env: "GEMINI_API_KEY_2"
-sem_stage2_api_key_env: "GEMINI_API_KEY_3"
-sem_prediction_api_key_env: "GEMINI_API_KEY_4"
+sem_stage1_api_key_env: "OPENAI_API_KEY"
+sem_stage2_api_key_env: "OPENAI_API_KEY"
+sem_prediction_api_key_env: "OPENAI_API_KEY"
 
 # Stage generation budgets
 sem_stage1_max_output_tokens: 4000

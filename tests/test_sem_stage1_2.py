@@ -8,12 +8,16 @@ from dotenv import load_dotenv
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
 
 from dataset import BundleZeroShotDataset, set_seed
-from main_sem import _build_clients, generate_content_with_retry
-from sem_agent.common import build_case_view, candidate_labels, compact_json
+from main import _build_clients, generate_content_with_retry
+from sem_agent.common import build_case_view, candidate_labels, compact_json, parse_json_from_text
 from sem_agent.workspace import prepare_workspace, build_source_manifest
-from sem_agent.affordance_graph import build_evidence_affordance_graph
 from sem_agent.prompts import stage1_ecosystem_prompt, stage2_gap_prompt
-from sem_agent.pipeline import _generate_execute_repair, build_decision_case
+from sem_agent.pipeline import (
+    _call_stage,
+    _generate_execute_repair,
+    build_decision_case,
+    validate_stage2_summary_evidence,
+)
 
 load_dotenv(
     dotenv_path=os.path.join(os.path.dirname(__file__), "..", ".env"),
@@ -33,7 +37,6 @@ async def run_stage1_and_stage2_only(conf, sample, clients):
         workspace,
         str(conf.get("sem_current_bundle_train_context_policy", "allow")),
     )
-    affordance_graph = build_evidence_affordance_graph(source_manifest, conf["dataset"])
     max_chars = int(conf.get("sem_max_evidence_chars", 30000))
     
     print("\n[Stage 1: Item Evidence Expansion] Executing...")
@@ -41,7 +44,6 @@ async def run_stage1_and_stage2_only(conf, sample, clients):
     s1_prompt = stage1_ecosystem_prompt(
         case_view,
         source_manifest,
-        affordance_graph,
         s1_output_file,
         max_chars,
         semantic_case=semantic_case,
@@ -53,13 +55,12 @@ async def run_stage1_and_stage2_only(conf, sample, clients):
         case_view=case_view,
         source_manifest=source_manifest,
         initial_prompt=s1_prompt,
-        client=clients["code"],
+        client=clients["stage1"],
         conf=conf,
         generate_content_fn=generate_content_with_retry,
         workspace=workspace,
         output_file=s1_output_file,
         labels=labels,
-        affordance_graph=affordance_graph,
     )
     
     stage1_evidence = s1_result["accepted_evidence"] or {"signals": []}
@@ -71,24 +72,36 @@ async def run_stage1_and_stage2_only(conf, sample, clients):
     print("\n[Stage 2: Bundle Context & Candidate Fit] Executing...")
     s2_output_file = f"output/test_sem_bundle{sample['bundle_id']}_stage2.json"
     s2_prompt = stage2_gap_prompt(
-        case_view, source_manifest, affordance_graph, s2_output_file, max_chars,
+        case_view, source_manifest, s2_output_file, max_chars,
         stage1_evidence=stage1_evidence,
+        semantic_case=semantic_case,
     )
     
-    s2_result = await _generate_execute_repair(
-        bundle_id=sample["bundle_id"],
-        stage_index=1,
-        case_view=case_view,
-        source_manifest=source_manifest,
-        initial_prompt=s2_prompt,
-        client=clients["code"],
+    s2_raw = await _call_stage(
+        generate_content_with_retry,
+        clients["stage2"],
         conf=conf,
-        generate_content_fn=generate_content_with_retry,
-        workspace=workspace,
-        output_file=s2_output_file,
-        labels=labels,
-        affordance_graph=affordance_graph,
+        prompt=s2_prompt,
+        max_tokens_key="sem_stage2_max_output_tokens",
+        default_tokens=4000,
+        step_name="sem stage2 reasoning",
     )
+    parsed_stage2 = parse_json_from_text(s2_raw)
+    stage2_issues = []
+    if not isinstance(parsed_stage2, dict):
+        stage2_issues.append("Stage 2 response was not parseable JSON.")
+        stage2_evidence = {"signals": []}
+    else:
+        stage2_evidence = parsed_stage2
+        stage2_issues.extend(validate_stage2_summary_evidence(stage2_evidence, labels))
+    s2_result = {
+        "raw_response": s2_raw,
+        "generated_code": "",
+        "repairs": [],
+        "execution_summary": {"msg": "pure reasoning, skipped execution"},
+        "validation_issues": stage2_issues,
+        "accepted_evidence": stage2_evidence if not stage2_issues else None,
+    }
     
     stage2_evidence = s2_result["accepted_evidence"] or {"signals": []}
     print("Stage 2 execution completed.")
