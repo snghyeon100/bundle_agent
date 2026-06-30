@@ -242,14 +242,18 @@ def _build_clients(conf):
     clients = {}
     resolved = {}
     prior = []
-    # sem_agent uses three roles: stage1, stage2, and prediction (Decision)
+    # sem_agent uses four roles: analysis, evidence, summary, and prediction.
     role_keys = [
-        ("stage1", "sem_stage1_api_key_env"),
-        ("stage2", "sem_stage2_api_key_env"),
-        ("prediction", "sem_prediction_api_key_env"),
+        ("analysis", "sem_analysis_api_key_env", "sem_code_api_key_env"),
+        ("stage1", "sem_stage1_api_key_env", "sem_code_api_key_env"),
+        ("stage2", "sem_stage2_api_key_env", "sem_code_api_key_env"),
+        ("prediction", "sem_prediction_api_key_env", None),
     ]
-    for role, key in role_keys:
-        api_key, env = resolve_api_key(conf, key, prior + fallback)
+    for role, key, legacy_key in role_keys:
+        config_key = key
+        if not str(conf.get(config_key, "")).strip() and legacy_key:
+            config_key = legacy_key
+        api_key, env = resolve_api_key(conf, config_key, prior + fallback)
         clients[role] = create_llm_client(conf, api_key)
         resolved[role] = env
         prior.append(env)

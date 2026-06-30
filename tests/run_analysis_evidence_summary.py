@@ -11,7 +11,7 @@ from dataset import BundleZeroShotDataset, set_seed
 from main import _build_clients, generate_content_with_retry
 from sem_agent.common import build_case_view, candidate_labels, compact_json, parse_json_from_text
 from sem_agent.workspace import prepare_workspace, build_source_manifest
-from sem_agent.prompts import stage1_ecosystem_prompt, stage2_gap_prompt
+from sem_agent.prompts import problem_analysis_prompt, stage1_ecosystem_prompt, stage2_gap_prompt
 from sem_agent.pipeline import (
     _call_stage,
     _generate_execute_repair,
@@ -25,7 +25,7 @@ load_dotenv(
 )
 
 
-async def run_stage1_and_stage2_only(conf, sample, clients):
+async def run_analysis_evidence_summary(conf, sample, clients):
     print(f"--- Running Test for Bundle ID: {sample['bundle_id']} ---")
     
     # Setup
@@ -39,7 +39,21 @@ async def run_stage1_and_stage2_only(conf, sample, clients):
     )
     max_chars = int(conf.get("sem_max_evidence_chars", 30000))
     
-    print("\n[Stage 1: Item Evidence Expansion] Executing...")
+    print("\n[Problem Analysis] Executing...")
+    analysis_prompt = problem_analysis_prompt(case_view, source_manifest, semantic_case=semantic_case)
+    analysis_raw = await _call_stage(
+        generate_content_with_retry,
+        clients["analysis"],
+        conf=conf,
+        prompt=analysis_prompt,
+        max_tokens_key="sem_analysis_max_output_tokens",
+        default_tokens=1200,
+        step_name="sem problem analysis",
+    )
+    print("Problem Analysis completed.")
+    print(analysis_raw)
+
+    print("\n[Evidence Retrieval] Executing...")
     s1_output_file = f"output/test_sem_bundle{sample['bundle_id']}_stage1.json"
     s1_prompt = stage1_ecosystem_prompt(
         case_view,
@@ -47,6 +61,7 @@ async def run_stage1_and_stage2_only(conf, sample, clients):
         s1_output_file,
         max_chars,
         semantic_case=semantic_case,
+        problem_analysis=analysis_raw,
     )
     
     s1_result = await _generate_execute_repair(
@@ -63,13 +78,20 @@ async def run_stage1_and_stage2_only(conf, sample, clients):
         labels=labels,
     )
     
-    stage1_evidence = s1_result["accepted_evidence"] or {"signals": []}
-    print("Stage 1 execution completed.")
-    print("Stage 1 Validation Issues:", s1_result["validation_issues"])
-    print("Stage 1 Evidence Output:")
+    stage1_full_output = s1_result["accepted_evidence"] or {"signals": []}
+    stage1_evidence = (
+        {"signals": stage1_full_output["signals"]}
+        if isinstance(stage1_full_output, dict) and isinstance(stage1_full_output.get("signals"), list)
+        else {"signals": []}
+    )
+    print("Evidence Retrieval completed.")
+    print("Evidence Validation Issues:", s1_result["validation_issues"])
+    print("Evidence Policy Trace:")
+    print(compact_json(stage1_full_output.get("policy_trace", {}) if isinstance(stage1_full_output, dict) else {}))
+    print("Evidence Signals Output:")
     print(compact_json(stage1_evidence))
     
-    print("\n[Stage 2: Bundle Context & Candidate Fit] Executing...")
+    print("\n[Summary/Profile] Executing...")
     s2_output_file = f"output/test_sem_bundle{sample['bundle_id']}_stage2.json"
     s2_prompt = stage2_gap_prompt(
         case_view, source_manifest, s2_output_file, max_chars,
@@ -84,12 +106,12 @@ async def run_stage1_and_stage2_only(conf, sample, clients):
         prompt=s2_prompt,
         max_tokens_key="sem_stage2_max_output_tokens",
         default_tokens=4000,
-        step_name="sem stage2 reasoning",
+        step_name="sem summary/profile",
     )
     parsed_stage2 = parse_json_from_text(s2_raw)
     stage2_issues = []
     if not isinstance(parsed_stage2, dict):
-        stage2_issues.append("Stage 2 response was not parseable JSON.")
+        stage2_issues.append("Summary response was not parseable JSON.")
         stage2_evidence = {"signals": []}
     else:
         stage2_evidence = parsed_stage2
@@ -104,9 +126,9 @@ async def run_stage1_and_stage2_only(conf, sample, clients):
     }
     
     stage2_evidence = s2_result["accepted_evidence"] or {"signals": []}
-    print("Stage 2 execution completed.")
-    print("Stage 2 Validation Issues:", s2_result["validation_issues"])
-    print("Stage 2 Evidence Output:")
+    print("Summary/Profile completed.")
+    print("Summary Validation Issues:", s2_result["validation_issues"])
+    print("Summary Output:")
     print(compact_json(stage2_evidence))
     
     print("\n--- Test Completed ---")
@@ -114,7 +136,7 @@ async def run_stage1_and_stage2_only(conf, sample, clients):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Test sem_agent Stage 1 Item Evidence Expansion and Stage 2 Bundle Context & Candidate Fit without decision"
+        description="Test sem_agent Problem Analysis, Evidence Retrieval, and Summary/Profile without decision"
     )
     parser.add_argument("--config", default="config_sem.yaml")
     parser.add_argument("--bundle_index", type=int, default=0, help="Index of the bundle in the dataset to test")
@@ -137,7 +159,7 @@ def main():
     sample = samples[args.bundle_index]
     clients, _ = _build_clients(conf)
     
-    asyncio.run(run_stage1_and_stage2_only(conf, sample, clients))
+    asyncio.run(run_analysis_evidence_summary(conf, sample, clients))
 
 
 if __name__ == "__main__":

@@ -1,12 +1,10 @@
 """sem_agent pipeline.
 
-Two-stage fixed pipeline:
-  Stage 1 (Item Evidence Expansion)      → code retrieves supporting items that
-                                           explain each partial/candidate item.
-  Stage 2 (Bundle Context & Candidate Fit) → code builds bundle-level context
-                                             and candidate fit narratives.
-  Decision                               → reasoning LLM picks the best candidate
-                                           using narrative evidence (no bare numbers).
+Four-agent pipeline:
+  Problem Analysis   -> analyzes the sample to guide adaptive retrieval.
+  Evidence Retrieval -> code retrieves source-grounded item evidence.
+  Summary/Profile    -> compresses item text + evidence into neutral profiles.
+  Decision           -> picks the best candidate using only summary profiles.
 """
 
 import asyncio
@@ -31,6 +29,7 @@ from .workspace import (
 )
 from .prompts import (
     decision_prompt,
+    problem_analysis_prompt,
     repair_prompt,
     stage1_ecosystem_prompt,
     stage2_gap_prompt,
@@ -94,6 +93,41 @@ def _validate_observation_payload(payload, path):
     return issues
 
 
+def _signals_only(evidence):
+    if isinstance(evidence, dict) and isinstance(evidence.get("signals"), list):
+        return {"signals": evidence["signals"]}
+    return {"signals": []}
+
+
+def _policy_trace(evidence):
+    if isinstance(evidence, dict) and isinstance(evidence.get("policy_trace"), dict):
+        return evidence["policy_trace"]
+    return {}
+
+
+def _validate_policy_trace(payload):
+    issues = []
+    if not isinstance(payload, dict):
+        return ["policy_trace must be an object."]
+    allowed_fields = {
+        "sample_observation",
+        "base_retrieval_policy",
+        "fallback_rules",
+        "evidence_view_policy",
+    }
+    extra = sorted(set(payload) - allowed_fields)
+    if extra:
+        issues.append("policy_trace has unsupported fields: " + ", ".join(extra))
+    for field in allowed_fields:
+        value = payload.get(field)
+        if field == "sample_observation":
+            if not isinstance(value, str) or not value.strip():
+                issues.append("policy_trace.sample_observation must be a non-empty string.")
+        elif not isinstance(value, list) or not value or not all(str(v).strip() for v in value):
+            issues.append(f"policy_trace.{field} must be a non-empty list of strings.")
+    return issues
+
+
 def validate_evidence(evidence, labels, allowed_source_names, max_chars=30000, require_relation_path=False):
     """Validate the generated evidence JSON.
 
@@ -102,9 +136,10 @@ def validate_evidence(evidence, labels, allowed_source_names, max_chars=30000, r
     if not isinstance(evidence, dict):
         return ["Evidence must be a JSON object."]
     issues = _forbidden_keys(evidence)
-    unexpected = sorted(set(evidence) - {"signals"})
+    unexpected = sorted(set(evidence) - {"signals", "policy_trace"})
     if unexpected:
         issues.append("Unexpected top-level fields: " + ", ".join(unexpected))
+    issues.extend(_validate_policy_trace(evidence.get("policy_trace")))
     signals = evidence.get("signals")
     if not isinstance(signals, list) or not signals:
         issues.append("signals must be a non-empty list.")
@@ -419,7 +454,29 @@ async def run_sem_agent(
     decision_case = build_decision_case(sample, conf)
 
     # ------------------------------------------------------------------
-    # Stage 1: Item Evidence Expansion
+    # Stage 0: Problem Analysis
+    # ------------------------------------------------------------------
+    analysis_prompt = problem_analysis_prompt(
+        case_view,
+        source_manifest,
+        semantic_case=decision_case,
+    )
+    if is_first_sample and debug_callback:
+        debug_callback("Sem Agent Problem Analysis Prompt", analysis_prompt)
+
+    analysis_raw = await _call_stage(
+        generate_content_fn,
+        clients["analysis"],
+        conf,
+        analysis_prompt,
+        "sem_analysis_max_output_tokens",
+        1200,
+        "sem problem analysis",
+    )
+    print(f"  [Bundle {sample['bundle_id']}] Problem Analysis completed.")
+
+    # ------------------------------------------------------------------
+    # Stage 1: Evidence Retrieval
     # ------------------------------------------------------------------
     s1_output_file = f"output/sem_evidence_bundle{sample['bundle_id']}_stage1.json"
     s1_prompt = stage1_ecosystem_prompt(
@@ -428,9 +485,10 @@ async def run_sem_agent(
         s1_output_file,
         max_chars,
         semantic_case=decision_case,
+        problem_analysis=analysis_raw,
     )
     if is_first_sample and debug_callback:
-        debug_callback("Sem Agent Stage 1 Item Evidence Expansion Prompt", s1_prompt)
+        debug_callback("Sem Agent Evidence Retrieval Prompt", s1_prompt)
 
     s1_result = await _generate_execute_repair(
         bundle_id=sample["bundle_id"],
@@ -446,11 +504,13 @@ async def run_sem_agent(
         labels=labels,
     )
 
-    stage1_evidence = s1_result["accepted_evidence"] or {"signals": []}
-    print(f"  [Bundle {sample['bundle_id']}] Stage 1 (Data Retrieval) completed.")
+    stage1_full_output = s1_result["accepted_evidence"] or {"signals": []}
+    stage1_policy_trace = _policy_trace(stage1_full_output)
+    stage1_evidence = _signals_only(stage1_full_output)
+    print(f"  [Bundle {sample['bundle_id']}] Evidence Retrieval completed.")
 
     # ------------------------------------------------------------------
-    # Stage 2: Bundle Context & Candidate Fit
+    # Stage 2: Summary/Profile
     # ------------------------------------------------------------------
     s2_output_file = f"output/sem_evidence_bundle{sample['bundle_id']}_stage2.json"
     s2_prompt = stage2_gap_prompt(
@@ -459,7 +519,7 @@ async def run_sem_agent(
         semantic_case=decision_case,
     )
     if is_first_sample and debug_callback:
-        debug_callback("Sem Agent Stage 2 Bundle Context & Candidate Fit Prompt", s2_prompt)
+        debug_callback("Sem Agent Summary/Profile Prompt", s2_prompt)
 
     s2_raw = await _call_stage(
         generate_content_fn,
@@ -468,7 +528,7 @@ async def run_sem_agent(
         s2_prompt,
         "sem_stage2_max_output_tokens",
         4000,
-        "sem stage2 reasoning",
+        "sem summary/profile",
     )
     
     parsed_stage2 = parse_json_from_text(s2_raw)
@@ -491,7 +551,7 @@ async def run_sem_agent(
 
     # Decision receives only Stage 2 summaries. Stage 1 remains stored for audit/debug.
     final_evidence = s2_result["accepted_evidence"] or {"signals": []}
-    print(f"  [Bundle {sample['bundle_id']}] Stage 2 (Pure Reasoning) completed.")
+    print(f"  [Bundle {sample['bundle_id']}] Summary/Profile completed.")
 
     # ------------------------------------------------------------------
     # Decision
@@ -520,6 +580,9 @@ async def run_sem_agent(
         "sem_source_manifest": compact_json(source_manifest),
         "sem_case_view": compact_json(case_view),
         "sem_decision_case": compact_json(decision_case),
+        # Problem analysis
+        "sem_analysis_prompt": analysis_prompt,
+        "sem_analysis_raw_response": analysis_raw,
         # Stage 1
         "sem_s1_prompt": s1_prompt,
         "sem_s1_raw_response": s1_result["raw_response"],
@@ -528,6 +591,8 @@ async def run_sem_agent(
         "sem_s1_execution_summary": compact_json(s1_result["execution_summary"]),
         "sem_s1_validation_issues": compact_json(s1_result["validation_issues"]),
         "sem_s1_accepted": s1_result["accepted_evidence"] is not None,
+        "sem_s1_policy_trace": compact_json(stage1_policy_trace),
+        "sem_s1_full_output_json": compact_json(stage1_full_output),
         "sem_s1_evidence_json": compact_json(stage1_evidence),
         # Stage 2
         "sem_s2_prompt": s2_prompt,

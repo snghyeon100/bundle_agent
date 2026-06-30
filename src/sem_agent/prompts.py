@@ -68,7 +68,40 @@ def _unified_case_context(case_view, semantic_case=None):
 
 
 # ---------------------------------------------------------------------------
-# Stage 1 prompt
+# Problem analysis prompt
+# ---------------------------------------------------------------------------
+
+def problem_analysis_prompt(case_view, source_manifest, semantic_case=None):
+    return (
+        "You are a Problem Analysis Agent for a bundle-completion evidence pipeline.\n\n"
+        "A partial bundle and multiple candidate items are given. The final task of the full "
+        "system is to choose which candidate item should be added to the partial bundle.\n\n"
+        "Your role is not to answer the task. Your role is to analyze this specific problem "
+        "instance so that a later evidence-retrieval agent can retrieve sample-adaptive evidence.\n\n"
+        "Analyze what needs to be understood about this instance in order to retrieve useful, "
+        "source-grounded evidence for the partial item(s) and each candidate. Decide for yourself "
+        "what aspects of the problem are important. The analysis should be specific to this sample, "
+        "not generic advice for all bundle-completion tasks.\n\n"
+        "You will also be given a manifest of available data sources. Use it only to reason about "
+        "what kinds of evidence could be useful. Do not invent source evidence and do not claim "
+        "that a source contains a fact unless it has actually been retrieved later.\n\n"
+        "Important constraints:\n"
+        "- Do not choose or rank candidates.\n"
+        "- Do not judge candidate fit.\n"
+        "- Do not produce final recommendations.\n"
+        "- Do not invent evidence.\n"
+        "- You may infer tentative item roles or problem structure from item text, but express "
+        "uncertainty when appropriate.\n\n"
+        "Return a concise free-form analysis that would help the evidence-retrieval agent decide "
+        "what to retrieve.\n\n"
+        f"{task_semantics(case_view['dataset'])}\n\n"
+        f"Unified case context (IDs and text together):\n{_dump(_unified_case_context(case_view, semantic_case))}\n\n"
+        f"Source Capability Manifest:\n{_dump(source_manifest)}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Evidence retrieval prompt
 # ---------------------------------------------------------------------------
 
 def stage1_ecosystem_prompt(
@@ -77,6 +110,7 @@ def stage1_ecosystem_prompt(
     output_file,
     max_evidence_chars,
     semantic_case=None,
+    problem_analysis=None,
 ):
     """Stage 1: Item Evidence Expansion Builder.
 
@@ -116,7 +150,9 @@ def stage1_ecosystem_prompt(
         "allowed only when the base policy returns sparse or empty evidence for that candidate, "
         "or when the candidate's item role makes the base operator insufficient for neutral item "
         "profiling. Do not use deeper retrieval for a candidate because it appears more compatible "
-        "with the partial bundle.\n\n"
+        "with the partial bundle. Your generated code must explicitly construct a `policy_trace` "
+        "object before retrieval and then execute retrieval according to that trace. Do not simply "
+        "run all operators for every candidate by default.\n\n"
 
         "SAMPLE-ADAPTIVE EVIDENCE VIEWS\n"
         "Adaptiveness also applies to evidence representation. Your code may compute "
@@ -141,8 +177,16 @@ def stage1_ecosystem_prompt(
         "keep only `signal_scope` and evidence arrays.\n\n"
 
         "STAGE 1 OUTPUT STRUCTURE\n"
-        "Produce JSON with exactly these two signal shapes:\n"
+        "Produce JSON with `policy_trace` for audit/debug and exactly these two signal shapes. "
+        "`policy_trace` is not final decision evidence; it is used only to audit the generated "
+        "retrieval program.\n"
         "{\n"
+        '  "policy_trace": {\n'
+        '    "sample_observation": "short description of item roles/source sparsity that guided retrieval, without ranking candidates",\n'
+        '    "base_retrieval_policy": ["shared base retrieval path applied to all candidates"],\n'
+        '    "fallback_rules": ["fallback rule used only for sparse evidence or item-role mismatch"],\n'
+        '    "evidence_view_policy": ["how selected source evidence is represented, e.g. grouped examples or sparsity notes"]\n'
+        "  },\n"
         '  "signals": [\n'
         "    {\n"
         '      "signal_scope": "partial_bundle",\n'
@@ -184,8 +228,11 @@ def stage1_ecosystem_prompt(
     return (
         "You are the Stage 1 Sample-Adaptive Evidence Retrieval Code Generator in a bundle-completion system.\n"
         "Generate ONLY complete executable Python code — no markdown fences, no explanation.\n"
-        "The script runs with the allowed workspace as its current directory.\n\n"
+        "The script runs with the allowed workspace as its current directory.\n"
+        f"The script must write UTF-8 JSON to exactly this path: {output_file}\n\n"
         f"{task_semantics(case_view['dataset'])}\n\n"
+        f"Problem Analysis Guidance (not evidence; do not copy it as evidence):\n"
+        f"{problem_analysis or '(none provided)'}\n\n"
         f"{semantic_goals}\n"
         #f"{_shared_rules(output_file, labels, max_evidence_chars)}\n"
         f"Unified case context (IDs and text together):\n{_dump(_unified_case_context(case_view, semantic_case))}\n\n"
@@ -430,9 +477,16 @@ def repair_prompt(
         f"`base co-bundle profile via bundle 11186: item title 1; item title 2`. For high-fanout groups, "
         f"include up to 5 representative titles and append a count such as "
         f"`(+1432 more items not shown)`.{relation_path_rule}\n\n"
-        "Preserve this exact schema. Include `observation` only for partial_bundle "
-        "signals, and include `candidate_observations` only for candidate signals:\n"
+        "Preserve this exact schema. Include `policy_trace` for audit/debug only. "
+        "Include `observation` only for partial_bundle signals, and include "
+        "`candidate_observations` only for candidate signals:\n"
         "{\n"
+        '  "policy_trace": {\n'
+        '    "sample_observation": "...",\n'
+        '    "base_retrieval_policy": ["..."],\n'
+        '    "fallback_rules": ["..."],\n'
+        '    "evidence_view_policy": ["..."]\n'
+        "  },\n"
         '  "signals": [\n'
         "    {\n"
         '      "signal_scope": "partial_bundle | candidate",\n'

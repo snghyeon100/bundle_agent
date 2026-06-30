@@ -70,7 +70,7 @@ async def generate_content_with_progress(client, model, contents, conf, max_outp
 
 def analysis_run_dir(sample, analysis_dir):
     bundle_id = sample["bundle_id"]
-    run_dir = os.path.join(analysis_dir, f"sem_stage2_bundle{bundle_id}")
+    run_dir = os.path.join(analysis_dir, f"sem_summary_bundle{bundle_id}")
     os.makedirs(run_dir, exist_ok=True)
     return run_dir
 
@@ -79,8 +79,8 @@ def default_stage1_json_path(sample, analysis_dir):
     bundle_id = sample["bundle_id"]
     return os.path.join(
         analysis_dir,
-        f"sem_stage1_bundle{bundle_id}",
-        "stage1_evidence.json",
+        f"sem_evidence_bundle{bundle_id}",
+        "evidence_signals.json",
     )
 
 
@@ -92,7 +92,7 @@ def load_stage1_evidence(path):
         return payload
 
     raise ValueError(
-        f"Stage 1 JSON must be an evidence object with a signals list: {path}"
+        f"Evidence signals JSON must be an object with a signals list: {path}"
     )
 
 
@@ -119,10 +119,10 @@ def save_analysis_outputs(
     )
 
     stage1_copy_path = os.path.join(run_dir, "stage1_evidence_input.json")
-    evidence_path = os.path.join(run_dir, "stage2_evidence.json")
-    prompt_path = os.path.join(run_dir, "stage2_prompt.txt")
-    summary_path = os.path.join(run_dir, "stage2_summary.json")
-    script_path = os.path.join(run_dir, "stage2_generated_code.py")
+    evidence_path = os.path.join(run_dir, "summary_output.json")
+    prompt_path = os.path.join(run_dir, "summary_prompt.txt")
+    summary_path = os.path.join(run_dir, "summary_run_summary.json")
+    script_path = os.path.join(run_dir, "summary_generated_code.py")
 
     with open(stage1_copy_path, "w", encoding="utf-8") as handle:
         json.dump(stage1_evidence, handle, ensure_ascii=False, indent=2)
@@ -175,7 +175,7 @@ async def run_stage2_only(
     run_conf = dict(conf)
     run_conf["sem_workspace_root"] = os.path.join(run_dir, "workspace")
 
-    log("[1/8] Loading saved Stage 1 evidence JSON")
+    log("[1/8] Loading saved evidence signals JSON")
     log(f"      path: {stage1_json_path}")
     stage1_evidence = load_stage1_evidence(stage1_json_path)
     stage1_names = signal_names(stage1_evidence)
@@ -189,7 +189,7 @@ async def run_stage2_only(
     decision_case = build_decision_case(sample, conf)
     log(f"      case: {compact_json(summarize_case(sample, labels))}")
 
-    log("[3/8] Preparing isolated Stage 2 workspace")
+    log("[3/8] Preparing isolated Summary workspace")
     workspace = prepare_workspace(run_conf, config_prefix="sem")
     workspace_files = [entry["name"] for entry in workspace.get("files", [])]
     copied_files = workspace.get("copied_files", [])
@@ -206,7 +206,7 @@ async def run_stage2_only(
     log(f"      manifest sources: {len(source_manifest.get('sources', []))}")
     log(f"      max evidence chars: {max_chars}")
 
-    log("[5/8] Building Stage 2 prompt")
+    log("[5/8] Building Summary prompt")
     output_file = f"output/test_sem_bundle{sample['bundle_id']}_stage2.json"
     prompt = stage2_gap_prompt(
         case_view,
@@ -220,11 +220,11 @@ async def run_stage2_only(
     log(f"      prompt chars: {len(prompt)}")
 
     if print_prompt:
-        print("\n[Stage 2 Prompt]")
+        print("\n[Summary Prompt]")
         print(prompt)
         print("\n" + "-" * 80)
 
-    log("[6/8] Generating Stage 2 pure reasoning response")
+    log("[6/8] Generating Summary pure reasoning response")
     s2_raw = await _call_stage(
         generate_content_with_progress,
         clients["stage2"],
@@ -232,13 +232,13 @@ async def run_stage2_only(
         prompt,
         "sem_stage2_max_output_tokens",
         4000,
-        "sem stage2 reasoning",
+        "sem summary/profile",
     )
     
     parsed_stage2 = parse_json_from_text(s2_raw)
     stage2_issues = []
     if not isinstance(parsed_stage2, dict):
-        stage2_issues.append("Stage 2 response was not parseable JSON.")
+        stage2_issues.append("Summary response was not parseable JSON.")
         stage2_evidence = {"signals": []}
     else:
         stage2_evidence = parsed_stage2
@@ -277,16 +277,16 @@ async def run_stage2_only(
     log(f"      script copy: {analysis_paths['script_path'] or '(not created)'}")
     log(f"      evidence copy: {analysis_paths['evidence_path']}")
 
-    log("[8/8] Stage 2 result")
+    log("[8/8] Summary result")
     print(f"Bundle ID: {sample['bundle_id']}")
-    print(f"Stage 1 Evidence JSON: {stage1_json_path}")
+    print(f"Evidence Signals JSON: {stage1_json_path}")
     print(f"Workspace: {workspace['workspace_dir']}")
     print(f"Generated script: {script_path}")
     print(f"Evidence JSON: {output_path}")
     print(f"Analysis output: {analysis_paths['run_dir']}")
     print(f"Accepted: {result['accepted_evidence'] is not None}")
     print(f"Validation issues: {result['validation_issues']}")
-    print("\n[Stage 2 Evidence]")
+    print("\n[Summary Output]")
     print(compact_json(evidence))
 
     return result
@@ -305,7 +305,7 @@ def load_config(path):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Run only Stage 2 Bundle Context & Candidate Fit of sem_agent using saved Stage 1 JSON"
+        description="Run only Summary/Profile of sem_agent using saved evidence signals JSON"
     )
     parser.add_argument("--config", default="config_sem.yaml")
     parser.add_argument(
@@ -318,19 +318,19 @@ def main():
         "--stage1_json",
         default="",
         help=(
-            "Path to Stage 1 evidence JSON. Defaults to "
-            "analysis/sem_stage1_bundle{bundle_id}/stage1_evidence.json"
+            "Path to evidence signals JSON. Defaults to "
+            "analysis/sem_evidence_bundle{bundle_id}/evidence_signals.json"
         ),
     )
     parser.add_argument(
         "--print_prompt",
         action="store_true",
-        help="Print the Stage 2 code-generation prompt before calling the model",
+        help="Print the Summary/Profile prompt before calling the model",
     )
     parser.add_argument(
         "--analysis_dir",
         default=os.path.join(REPO_ROOT, "analysis"),
-        help="Directory where Stage 2 test outputs are saved",
+        help="Directory where Summary/Profile test outputs are saved",
     )
     args = parser.parse_args()
 
@@ -355,12 +355,12 @@ def main():
         stage1_json_path = os.path.join(REPO_ROOT, stage1_json_path)
     if not os.path.isfile(stage1_json_path):
         raise FileNotFoundError(
-            "Stage 1 evidence JSON not found. Run tests/run_sem_stage1.py first "
+            "Evidence signals JSON not found. Run tests/run_evidence.py first "
             f"or pass --stage1_json. Missing: {stage1_json_path}"
         )
 
     clients, resolved_envs = _build_clients(conf)
-    print(f"Stage 2 API key env: {resolved_envs['stage2']}")
+    print(f"Summary API key env: {resolved_envs['stage2']}")
 
     asyncio.run(
         run_stage2_only(

@@ -1,8 +1,7 @@
 """Semantic evidence expansion agent.
 
-Two-stage code-generation pipeline that expands item-level supporting evidence
-(Stage 1) and builds bundle context plus candidate-fit narratives (Stage 2),
-then feeds them to a reasoning decision model.
+Four-agent pipeline: problem analysis, evidence retrieval code generation,
+neutral item summary/profile, and final reasoning decision.
 """
 
 from .pipeline import run_sem_agent
