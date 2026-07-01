@@ -3,35 +3,40 @@
 # ============================================================
 
 # Dataset
-dataset: pog                   # pog | pog_dense | spotify | spotify_sparse
+dataset: pog                  # pog | pog_dense | spotify | spotify_sparse
 data_path: ./datasets
 
 # Evaluation
 num_cans: 10                   # number of candidates (including answer)
 num_token: 5                   # max partial-bundle items (-1 = no limit)
-toy_eval: 2                    # -1 = full test set | N = first N samples
+toy_eval: 5                    # -1 = full test set | N = first N samples
 seed: 45
 shuffle_seed: 41
 
 # LLM
-llm_provider: gemini #gemini openai           # gemini | openai
-model: gemini-3-flash-preview #gemini-3-flash-preview #gpt-4.1
+llm_provider: openai  #gemini openai           # gemini | openai
+model: gpt-5.1 #gemini-3-flash-preview #gpt-4.1
 temperature: 0.0
 openai_send_temperature: false
 openai_reasoning_effort: "low"    # minimal | low | medium | high
 
 # sem_agent stage clients
-# Code client: problem analysis + evidence code generation + summary/profile
-# Prediction client: final reasoning decision
-sem_code_api_key_env: "GEMINI_API_KEY_3" #OPENAI_API_KEY
-sem_prediction_api_key_env: "GEMINI_API_KEY_4"
+# Code client: Stage 1 (Ecosystem Profile) + Stage 2 (Gap + Cross-val)
+# Prediction client: final Reasoning Decision (lighter model is fine)
+sem_code_api_key_env: "OPENAI_API_KEY" #OPENAI_API_KEY
+sem_prediction_api_key_env: "OPENAI_API_KEY"
 
 # Token budgets
-sem_code_max_output_tokens: 4000
-sem_analysis_max_output_tokens: 1200
-sem_stage1_max_output_tokens: 6000
-sem_stage2_max_output_tokens: 12000
-sem_prediction_max_output_tokens: 200
+# Problem analysis needs enough room to mention every candidate without truncation.
+sem_analysis_max_output_tokens: 3500
+# Legacy/general code budget; Stage 1 uses the stage-specific budget below.
+sem_code_max_output_tokens: 9000
+# Stage 1 generates executable retrieval code plus JSON-writing logic.
+sem_stage1_max_output_tokens: 9000
+# Stage 2 writes neutral A-J semantic profiles; keep ample but bounded.
+sem_stage2_max_output_tokens: 7000
+# Final decision should be a single label, but allow small JSON/format spillover.
+sem_prediction_max_output_tokens: 300
 
 # Repair and evidence settings
 sem_code_max_repair_attempts: 2

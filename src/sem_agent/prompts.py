@@ -120,47 +120,25 @@ def stage1_ecosystem_prompt(
     labels = ", ".join(candidate_labels(case_view))
 
     semantic_goals = (
-        "STAGE 1 TASK - Sample-Adaptive Evidence Program Synthesis\n"
-        "Generate executable Python code that performs sample-adaptive evidence retrieval "
-        "for this specific bundle-completion instance. Your code should adapt both "
-        "(1) which source paths are used and (2) how evidence from those paths is represented. "
-        "This stage retrieves and formats source-grounded evidence only; it must not make "
-        "candidate-fit judgments or choose an answer.\n\n"
-
-        "AVAILABLE RETRIEVAL OPERATORS\n"
-        "Use these operators as a library, not as a fixed checklist. You are not required "
-        "to use every operator.\n"
-        "1. Co-bundle expansion: use bundle-item data to follow item -> historical bundle -> "
-        "other items in the same bundle. This is direct bundle-context evidence but may be sparse.\n"
-        "2. Shared-user expansion: use user-item data to follow item -> users -> other items "
-        "interacted by those users. This can reveal user/style context but may be noisy or high-fanout.\n"
-        "3. Category/metadata anchor expansion: use item metadata to find same or related "
-        "category anchors. This grounds item type/style but is not direct compatibility evidence.\n"
-        "4. Representation-neighbor expansion: use image, text, content, UI-LightGCN, BI-LightGCN, "
-        "or CF features to retrieve nearest-neighbor items. This is useful as a sparse-evidence fallback, "
-        "but may retrieve substitutes rather than complementary items.\n"
-        "5. Cross-source composition: when useful, compose relations such as item -> bundle -> "
-        "co-item -> metadata, item -> user -> interacted item -> bundle, or item -> embedding "
-        "neighbor -> metadata/category.\n\n"
-
-        "SAMPLE-ADAPTIVE POLICY\n"
-        "First infer a compact sample-level base retrieval policy from the partial item text, "
-        "candidate item texts, source availability, item roles, and evidence sparsity. Apply this "
-        "base policy to every candidate for comparability. Candidate-specific fallback paths are "
-        "allowed only when the base policy returns sparse or empty evidence for that candidate, "
-        "or when the candidate's item role makes the base operator insufficient for neutral item "
-        "profiling. Do not use deeper retrieval for a candidate because it appears more compatible "
-        "with the partial bundle. Your generated code must explicitly construct a `policy_trace` "
-        "object before retrieval and then execute retrieval according to that trace. Do not simply "
-        "run all operators for every candidate by default.\n\n"
-
-        "SAMPLE-ADAPTIVE EVIDENCE VIEWS\n"
-        "Adaptiveness also applies to evidence representation. Your code may compute "
-        "sample-relevant evidence views from selected sources, such as grouped examples, "
-        "category/role concentration, source sparsity, broad-source warnings, source agreement "
-        "or disagreement, high-fanout-filtered contexts, or representative anchors. Use statistics "
-        "inside the code to decide what is representative, but output compact qualitative evidence "
-        "strings rather than bare numeric scores.\n\n"
+        "STAGE 1 TASK - Analysis-Conditioned Sample-Adaptive Evidence Code Generation\n"
+        "You are a Python code generator for retrieving sample-adaptive evidence for each "
+        "partial-bundle item and each candidate item. Use the given Problem Analysis as the "
+        "primary guide for what this sample needs. Convert that analysis into executable, "
+        "source-grounded retrieval code using the available workspace files. The Problem "
+        "Analysis is not evidence; it is a retrieval plan and diagnostic guide.\n\n"
+        "Choose source paths, fallback paths, and evidence views according to the analysis, "
+        "source availability, item roles, and evidence sparsity. Do not replace the analysis "
+        "with a generic fixed recipe, and do not redo final-answer reasoning. Keep candidates "
+        "comparable in output format and evidence granularity, but allow candidate-specific "
+        "retrieval paths or evidence views whenever the Problem Analysis, item role, source "
+        "availability, or evidence sparsity makes them useful.\n\n"
+        "Your code must construct a `policy_trace` before retrieval and then execute retrieval "
+        "according to that trace. In the trace, record which analysis-driven needs were "
+        "implemented, which were skipped, what fallback logic was used, and how evidence was "
+        "represented. Evidence may use grouped examples, category/role concentration, source "
+        "sparsity, broad-source warnings, source agreement or disagreement, high-fanout-filtered "
+        "contexts, or representative anchors. Use statistics inside the code when useful, but "
+        "output compact qualitative evidence strings rather than bare numeric scores.\n\n"
 
         "EVIDENCE STRING RULES\n"
         "For every target item, output evidence strings grounded in retrieved item titles or metadata. "
@@ -182,9 +160,10 @@ def stage1_ecosystem_prompt(
         "retrieval program.\n"
         "{\n"
         '  "policy_trace": {\n'
-        '    "sample_observation": "short description of item roles/source sparsity that guided retrieval, without ranking candidates",\n'
-        '    "base_retrieval_policy": ["shared base retrieval path applied to all candidates"],\n'
-        '    "fallback_rules": ["fallback rule used only for sparse evidence or item-role mismatch"],\n'
+        '    "analysis_driven_needs": ["sample-specific retrieval need taken from the Problem Analysis"],\n'
+        '    "implemented_retrieval_paths": ["source-grounded retrieval path implemented in code"],\n'
+        '    "skipped_analysis_needs": ["analysis-suggested retrieval need not implemented, with a short reason"],\n'
+        '    "fallbacks": ["fallback rule used only for sparse evidence or item-role mismatch"],\n'
         '    "evidence_view_policy": ["how selected source evidence is represented, e.g. grouped examples or sparsity notes"]\n'
         "  },\n"
         '  "signals": [\n'
@@ -217,7 +196,7 @@ def stage1_ecosystem_prompt(
         "- You are FREE to choose any traversal paths through the available sources "
         "to implement this task. The task is a semantic target, not an algorithmic "
         "prescription.\n"
-        "- Treat the listed sources as a relation graph, not as isolated files. You can compose relations to retrieve supporting items through multi-hop paths.\n"
+        "- Treat the listed sources as a relation graph, not as isolated files. You can compose relations when useful to retrieve supporting items.\n"
         "- CPU-only: load every .pt file with torch.load(..., map_location=\"cpu\"). "
         "If a tensor requires gradients, call detach() before numpy().\n"
         "- Keep numpy arrays as numpy arrays while using numpy attributes such as `.size`, "
@@ -226,7 +205,7 @@ def stage1_ecosystem_prompt(
     )
 
     return (
-        "You are the Stage 1 Sample-Adaptive Evidence Retrieval Code Generator in a bundle-completion system.\n"
+        "You are the Stage 1 Analysis-Conditioned Evidence Retrieval Code Generator in a bundle-completion system.\n"
         "Generate ONLY complete executable Python code — no markdown fences, no explanation.\n"
         "The script runs with the allowed workspace as its current directory.\n"
         f"The script must write UTF-8 JSON to exactly this path: {output_file}\n\n"
@@ -482,9 +461,10 @@ def repair_prompt(
         "`candidate_observations` only for candidate signals:\n"
         "{\n"
         '  "policy_trace": {\n'
-        '    "sample_observation": "...",\n'
-        '    "base_retrieval_policy": ["..."],\n'
-        '    "fallback_rules": ["..."],\n'
+        '    "analysis_driven_needs": ["..."],\n'
+        '    "implemented_retrieval_paths": ["..."],\n'
+        '    "skipped_analysis_needs": ["..."],\n'
+        '    "fallbacks": ["..."],\n'
         '    "evidence_view_policy": ["..."]\n'
         "  },\n"
         '  "signals": [\n'

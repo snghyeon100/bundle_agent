@@ -110,9 +110,10 @@ def _validate_policy_trace(payload):
     if not isinstance(payload, dict):
         return ["policy_trace must be an object."]
     allowed_fields = {
-        "sample_observation",
-        "base_retrieval_policy",
-        "fallback_rules",
+        "analysis_driven_needs",
+        "implemented_retrieval_paths",
+        "skipped_analysis_needs",
+        "fallbacks",
         "evidence_view_policy",
     }
     extra = sorted(set(payload) - allowed_fields)
@@ -120,10 +121,7 @@ def _validate_policy_trace(payload):
         issues.append("policy_trace has unsupported fields: " + ", ".join(extra))
     for field in allowed_fields:
         value = payload.get(field)
-        if field == "sample_observation":
-            if not isinstance(value, str) or not value.strip():
-                issues.append("policy_trace.sample_observation must be a non-empty string.")
-        elif not isinstance(value, list) or not value or not all(str(v).strip() for v in value):
+        if not isinstance(value, list) or not value or not all(str(v).strip() for v in value):
             issues.append(f"policy_trace.{field} must be a non-empty list of strings.")
     return issues
 
