@@ -3,7 +3,7 @@
 # ============================================================
 
 # Dataset
-dataset: pog                  # pog | pog_dense | spotify | spotify_sparse
+dataset: pog_dense                  # pog | pog_dense | spotify | spotify_sparse
 data_path: ./datasets
 
 # Evaluation
@@ -14,21 +14,35 @@ seed: 45
 shuffle_seed: 41
 
 # LLM
-llm_provider: openai  #gemini openai           # gemini | openai
-model: gpt-5.1 #gemini-3-flash-preview #gpt-4.1
+llm_provider: openai  # default provider fallback: gemini | openai
+model: gpt-5.1        # default model fallback
 temperature: 0.0
 openai_send_temperature: false
 openai_reasoning_effort: "low"    # minimal | low | medium | high
 
 # sem_agent stage clients
-# Code client: Stage 1 (Ecosystem Profile) + Stage 2 (Gap + Cross-val)
-# Prediction client: final Reasoning Decision (lighter model is fine)
-sem_code_api_key_env: "OPENAI_API_KEY" #OPENAI_API_KEY
-sem_prediction_api_key_env: "OPENAI_API_KEY"
+# Each *_provider/*_model overrides the default LLM settings for that stage.
+# Each *_api_key_env value is the name of an environment variable containing the API key.
+# Leave a stage-specific key empty to fall back to the legacy/shared key below.
+sem_analysis_provider: openai
+sem_analysis_model: gpt-5.1
+sem_analysis_api_key_env: "OPENAI_API_KEY"  # Stage 0: Problem Analysis
+
+sem_evidence_provider: openai
+sem_evidence_model: gpt-5.1
+sem_evidence_api_key_env: "OPENAI_API_KEY"  # Stage 1: Evidence Retrieval code generation
+
+sem_summary_provider: gemini
+sem_summary_model: gemini-3-flash-preview
+sem_summary_api_key_env: "GEMINI_API_KEY_3" # Stage 2: Summary/Profile
+
+sem_decision_provider: gemini
+sem_decision_model: gemini-3-flash-preview
+sem_decision_api_key_env: "GEMINI_API_KEY_3" # Stage 3: Final Decision
 
 # Token budgets
 # Problem analysis needs enough room to mention every candidate without truncation.
-sem_analysis_max_output_tokens: 3500
+sem_analysis_max_output_tokens: 4500
 # Legacy/general code budget; Stage 1 uses the stage-specific budget below.
 sem_code_max_output_tokens: 9000
 # Stage 1 generates executable retrieval code plus JSON-writing logic.

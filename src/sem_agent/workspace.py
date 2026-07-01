@@ -3,11 +3,13 @@
 No dependency on progressive_signal_agent or simple_signal_agent.
 """
 
+import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+from collections import Counter
 
 from .common import parse_json_from_text
 
@@ -312,6 +314,186 @@ def build_source_manifest(workspace, current_bundle_policy):
             "Never access test ground truth, full bundle files, result files, labels, predictions, or hits.",
             "Do not use network access or paths outside the workspace.",
         ],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Lightweight analysis reconnaissance
+# ---------------------------------------------------------------------------
+
+def _safe_int(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _item_metadata(meta):
+    if not isinstance(meta, dict):
+        return {}
+    out = {}
+    for key in ("title", "cate", "cate_id", "track_name", "artist_name", "album_name"):
+        value = meta.get(key)
+        if value is not None and str(value).strip():
+            out[key] = str(value).strip()
+    if not out.get("cate") and out.get("cate_id"):
+        out["cate"] = out["cate_id"]
+    return out
+
+
+def build_analysis_recon(workspace, case_view, max_scan_rows=None):
+    """Build small, train-safe data reconnaissance for Stage 0 planning.
+
+    This is deliberately not final evidence. It calibrates the analysis prompt
+    with source sparsity, role/category structure, and obvious fallback needs.
+    It only reads files already present in the sem workspace.
+    """
+    data_dir = workspace.get("data_dir", "")
+    item_info_path = os.path.join(data_dir, "item_info.json")
+    bi_train_path = os.path.join(data_dir, "bi_train.txt")
+
+    partial_ids = [_safe_int(v) for v in case_view.get("partial_item_ids", [])]
+    partial_ids = [v for v in partial_ids if v is not None]
+    candidates = []
+    for candidate in case_view.get("candidates", []):
+        item_id = _safe_int(candidate.get("item_id"))
+        if item_id is not None:
+            candidates.append({"label": str(candidate.get("label", "")), "item_id": item_id})
+    target_ids = partial_ids + [c["item_id"] for c in candidates]
+    target_set = set(target_ids)
+
+    item_info = {}
+    if os.path.isfile(item_info_path):
+        with open(item_info_path, "r", encoding="utf-8") as handle:
+            item_info = json.load(handle)
+
+    metadata = {}
+    cate_by_item = {}
+    for item_id in target_ids:
+        meta = _item_metadata(item_info.get(str(item_id), {}))
+        metadata[str(item_id)] = meta
+        if meta.get("cate"):
+            cate_by_item[item_id] = meta["cate"]
+
+    item_bundle_counts = {item_id: 0 for item_id in target_ids}
+    candidate_cooccurs_with_partial = {c["label"]: 0 for c in candidates}
+    exact_partial_set_bundle_count = 0
+    partial_cates = {cate_by_item[item_id] for item_id in partial_ids if item_id in cate_by_item}
+    partial_category_bundle_counts = {cate: 0 for cate in partial_cates}
+    partial_category_context_bundle_rows = 0
+    candidate_category_in_partial_context_rows = {c["label"]: 0 for c in candidates}
+    bundle_rows_scanned = 0
+
+    if os.path.isfile(bi_train_path):
+        with open(bi_train_path, "r", encoding="utf-8") as handle:
+            for line in handle:
+                if max_scan_rows is not None and bundle_rows_scanned >= max_scan_rows:
+                    break
+                values = [part.strip() for part in line.strip().split(",") if part.strip()]
+                if len(values) < 2:
+                    continue
+                item_ids = []
+                for raw in values[1:]:
+                    item_id = _safe_int(raw)
+                    if item_id is not None:
+                        item_ids.append(item_id)
+                if not item_ids:
+                    continue
+                bundle_rows_scanned += 1
+                item_set = set(item_ids)
+                for item_id in target_set.intersection(item_set):
+                    item_bundle_counts[item_id] += 1
+                if partial_ids and all(item_id in item_set for item_id in partial_ids):
+                    exact_partial_set_bundle_count += 1
+                if any(item_id in item_set for item_id in partial_ids):
+                    for candidate in candidates:
+                        if candidate["item_id"] in item_set:
+                            candidate_cooccurs_with_partial[candidate["label"]] += 1
+
+                if partial_cates:
+                    row_cates = [
+                        cate_by_item.get(item_id)
+                        or _item_metadata(item_info.get(str(item_id), {})).get("cate", "")
+                        for item_id in item_ids
+                    ]
+                    row_cates = [cate for cate in row_cates if cate]
+                    row_cate_counts = Counter(row_cates)
+                    for cate in partial_cates:
+                        if row_cate_counts.get(cate, 0) > 0:
+                            partial_category_bundle_counts[cate] += 1
+                    has_partial_category_context = all(
+                        row_cate_counts.get(cate, 0) > 0 for cate in partial_cates
+                    )
+                    if has_partial_category_context:
+                        partial_category_context_bundle_rows += 1
+                        for candidate in candidates:
+                            cand_cate = cate_by_item.get(candidate["item_id"])
+                            if cand_cate and cand_cate in row_cate_counts:
+                                candidate_category_in_partial_context_rows[candidate["label"]] += 1
+
+    partial_recon = {
+        str(item_id): {
+            "train_bundle_count": item_bundle_counts.get(item_id, 0),
+            "category_bundle_count": partial_category_bundle_counts.get(cate_by_item.get(item_id, ""), 0),
+        }
+        for item_id in partial_ids
+    }
+    candidate_recon = {}
+    for candidate in candidates:
+        cand_cate = cate_by_item.get(candidate["item_id"], "")
+        matching_partials = [
+            item_id for item_id in partial_ids
+            if cate_by_item.get(item_id, "") and cate_by_item.get(item_id, "") == cand_cate
+        ]
+        rows = candidate_category_in_partial_context_rows.get(candidate["label"], 0)
+        ratio = rows / partial_category_context_bundle_rows if partial_category_context_bundle_rows else None
+        candidate_recon[candidate["label"]] = {
+            "train_bundle_count": item_bundle_counts.get(candidate["item_id"], 0),
+            "direct_bundle_count_with_partial_set": candidate_cooccurs_with_partial.get(candidate["label"], 0),
+            "shares_partial_category": bool(matching_partials),
+            "candidate_category": cand_cate,
+            "matching_partial_item_ids": matching_partials,
+            "category_count_in_partial_context": rows,
+            "category_ratio_in_partial_context": ratio,
+        }
+
+    return {
+        "purpose": (
+            "Lightweight train-safe reconnaissance for planning only. "
+            "Use it to calibrate retrieval paths; do not treat it as final fit evidence."
+        ),
+        "recon_legend": {
+            "train_bundle_count": "Number of train bundles containing this exact item.",
+            "category_bundle_count": "For a partial item, number of train bundles containing at least one item with this partial item's category.",
+            "direct_bundle_count_with_partial_set": "For a candidate, number of train bundles containing this candidate item and all exact partial items.",
+            "shares_partial_category": "Whether the candidate category matches any partial item category.",
+            "candidate_category": "Category id of the candidate item.",
+            "matching_partial_item_ids": "Partial item ids whose category matches this candidate category.",
+            "category_count_in_partial_context": "Number of train bundles containing the partial category context and this candidate category.",
+            "category_ratio_in_partial_context": "category_count_in_partial_context divided by partial_category_context_bundle_count.",
+            "exact_partial_set_bundle_count": "Number of train bundles containing all exact partial items.",
+            "partial_category_context_bundle_count": "Number of train bundles containing all partial item categories.",
+            "partial_category_bundle_counts": "Per partial category, number of train bundles containing that category.",
+            "bundle_rows_scanned": "Number of bi_train bundle rows scanned to compute this recon.",
+        },
+        "sources_read": [
+            name for name, path in (
+                ("item_info.json", item_info_path),
+                ("bi_train.txt", bi_train_path),
+            )
+            if os.path.isfile(path)
+        ],
+        "partial_items": partial_recon,
+        "candidates": candidate_recon,
+        "partial_set": {
+            "partial_item_count": len(partial_ids),
+            "partial_categories": sorted(partial_cates),
+            "exact_partial_set_bundle_count": exact_partial_set_bundle_count,
+            "partial_category_bundle_counts": partial_category_bundle_counts,
+            "partial_category_context_bundle_count": partial_category_context_bundle_rows,
+            "bundle_rows_scanned": bundle_rows_scanned,
+            "max_scan_rows": max_scan_rows,
+        },
     }
 
 

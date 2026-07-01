@@ -17,7 +17,7 @@ from main import _build_clients, generate_content_with_retry
 from sem_agent.common import build_case_view
 from sem_agent.pipeline import _call_stage, build_decision_case
 from sem_agent.prompts import problem_analysis_prompt
-from sem_agent.workspace import build_source_manifest, prepare_workspace
+from sem_agent.workspace import build_analysis_recon, build_source_manifest, prepare_workspace
 
 
 load_dotenv(
@@ -45,7 +45,13 @@ async def run_analysis_only(conf, sample, clients, print_prompt=False, analysis_
         workspace,
         str(conf.get("sem_current_bundle_train_context_policy", "allow")),
     )
-    prompt = problem_analysis_prompt(case_view, source_manifest, semantic_case=semantic_case)
+    data_recon = build_analysis_recon(workspace, case_view)
+    prompt = problem_analysis_prompt(
+        case_view,
+        source_manifest,
+        semantic_case=semantic_case,
+        data_recon=data_recon,
+    )
 
     if print_prompt:
         print("\n[Problem Analysis Prompt]")

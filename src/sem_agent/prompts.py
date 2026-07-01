@@ -64,6 +64,39 @@ def _unified_case_context(case_view, semantic_case=None):
     return unified
 
 
+def _enriched_case_context(case_view, semantic_case=None, data_recon=None):
+    unified = _unified_case_context(case_view, semantic_case)
+    data_recon = data_recon or {}
+    partial_recon = data_recon.get("partial_items", {})
+    candidate_recon = data_recon.get("candidates", {})
+
+    for item in unified.get("partial_items", []):
+        metadata = item.pop("metadata", {}) if isinstance(item.get("metadata"), dict) else {}
+        cate = metadata.get("cate") or metadata.get("cate_id")
+        if cate:
+            item["cate"] = cate
+        recon = partial_recon.get(str(item.get("item_id")), {})
+        if recon:
+            item["recon"] = recon
+
+    for item in unified.get("candidates", []):
+        metadata = item.pop("metadata", {}) if isinstance(item.get("metadata"), dict) else {}
+        cate = metadata.get("cate") or metadata.get("cate_id")
+        if cate:
+            item["cate"] = cate
+        recon = candidate_recon.get(str(item.get("label")), {})
+        if recon:
+            item["recon"] = recon
+
+    if data_recon.get("partial_set"):
+        unified["partial_set_recon"] = data_recon.get("partial_set")
+    if data_recon.get("recon_legend"):
+        unified["recon_legend"] = data_recon.get("recon_legend")
+    if data_recon.get("sources_read"):
+        unified["recon_sources_read"] = data_recon.get("sources_read")
+    return unified
+
+
 
 
 
@@ -71,7 +104,7 @@ def _unified_case_context(case_view, semantic_case=None):
 # Problem analysis prompt
 # ---------------------------------------------------------------------------
 
-def problem_analysis_prompt(case_view, source_manifest, semantic_case=None):
+def problem_analysis_prompt(case_view, source_manifest, semantic_case=None, data_recon=None):
     return (
         "You are a Problem Analysis Agent for a bundle-completion evidence pipeline.\n\n"
         "A partial bundle and multiple candidate items are given. The final task of the full "
@@ -82,9 +115,10 @@ def problem_analysis_prompt(case_view, source_manifest, semantic_case=None):
         "source-grounded evidence for the partial item(s) and each candidate. Decide for yourself "
         "what aspects of the problem are important. The analysis should be specific to this sample, "
         "not generic advice for all bundle-completion tasks.\n\n"
-        "You will also be given a manifest of available data sources. Use it only to reason about "
-        "what kinds of evidence could be useful. Do not invent source evidence and do not claim "
-        "that a source contains a fact unless it has actually been retrieved later.\n\n"
+        "You will also be given a manifest of available data sources and a small deterministic "
+        "data reconnaissance summary. Use the reconnaissance only to calibrate retrieval strategy "
+        "around sparsity, category structure, and source availability. It is not final compatibility "
+        "evidence and should not be used to choose a candidate.\n\n"
         "Important constraints:\n"
         "- Do not choose or rank candidates.\n"
         "- Do not judge candidate fit.\n"
@@ -92,10 +126,51 @@ def problem_analysis_prompt(case_view, source_manifest, semantic_case=None):
         "- Do not invent evidence.\n"
         "- You may infer tentative item roles or problem structure from item text, but express "
         "uncertainty when appropriate.\n\n"
-        "Return a concise free-form analysis that would help the evidence-retrieval agent decide "
-        "what to retrieve.\n\n"
+        "Return ONLY JSON with this compact schema. Keep it sample-adaptive and concise:\n"
+        "{\n"
+        '  "summary": {\n'
+        '    "partial": "One short sentence about the partial item(s).",\n'
+        '    "candidates": "One short sentence about the candidate roles/categories and notable contrasts.",\n'
+        '    "recon": [\n'
+        '      "Short implication for retrieval based on the deterministic recon."\n'
+        "    ]\n"
+        "  },\n"
+        '  "strategy": {\n'
+        '    "global": [\n'
+        "      {\n"
+        '        "name": "short_unique_instruction_name",\n'
+        '        "paths": ["source_name.ext"],\n'
+        '        "anchor": "Concrete anchor such as partial item 6606, partial category, or a candidate label.",\n'
+        '        "operation": "Executable retrieval instruction, including what evidence view to output.",\n'
+        '        "filters": ["Sample-specific filters, grouping keys, title cues, categories, or fallback conditions."]\n'
+        "      }\n"
+        "    ],\n"
+        '    "candidate": {\n'
+        '      "A": [\n'
+        "        {\n"
+        '          "name": "short_unique_candidate_instruction_name",\n'
+        '          "paths": ["source_name.ext"],\n'
+        '          "anchor": "Candidate A and any relevant partial anchor.",\n'
+        '          "operation": "Candidate-specific retrieval instruction, not a fit judgment.",\n'
+        '          "filters": ["Candidate-specific filters or grouping keys."]\n'
+        "        }\n"
+        "      ]\n"
+        "    }\n"
+        "  }\n"
+        "}\n\n"
+        "The `strategy.global` list should contain executable retrieval instructions useful across "
+        "the sample. Each instruction must name the source paths, anchor, operation, "
+        "and filters/grouping. The operation must include the evidence view to output. Avoid generic operations like plain nearest "
+        "neighbors unless you add sample-specific anchors, filters, clusters, or aggregation. "
+        "The `strategy.candidate` object should only mention candidates that need special retrieval "
+        "because of role, category overlap, sparsity, season/style cues, motif cues, or other "
+        "sample-specific issues, and each entry must use the same executable instruction format.\n\n"
         f"{task_semantics(case_view['dataset'])}\n\n"
-        f"Unified case context (IDs and text together):\n{_dump(_unified_case_context(case_view, semantic_case))}\n\n"
+        "Enriched case context (IDs/text/category plus deterministic planning recon):\n"
+        f"{_dump(_enriched_case_context(case_view, semantic_case, data_recon))}\n\n"
+        "Recon fields are planning inputs, not final compatibility evidence. Use item-level "
+        "`recon` fields for candidate-specific strategy and `partial_set_recon` for global strategy. "
+        "Use `recon_legend` to interpret recon field names.\n\n"
         f"Source Capability Manifest:\n{_dump(source_manifest)}"
     )
 
@@ -132,6 +207,17 @@ def stage1_ecosystem_prompt(
         "comparable in output format and evidence granularity, but allow candidate-specific "
         "retrieval paths or evidence views whenever the Problem Analysis, item role, source "
         "availability, or evidence sparsity makes them useful.\n\n"
+        "If the Problem Analysis provides executable strategy objects with fields such as "
+        "`name`, `paths`, `anchor`, `operation`, and `filters` (or `filters_or_grouping`), "
+        "treat them as the main retrieval contract. For each `strategy.global` or legacy "
+        "`global_strategy` instruction, "
+        "implement at least one evidence view that reflects its anchor plus filters/grouping, "
+        "or record the instruction name and concrete skip reason in `skipped_analysis_needs`. "
+        "For each candidate listed under `strategy.candidate` or legacy `candidate_strategy`, implement at least one "
+        "candidate-specific evidence string tied to that instruction, or record the exact "
+        "instruction name and reason it was skipped. Do not satisfy an executable strategy "
+        "with the same generic nearest-neighbor or co-bundle template for every item unless "
+        "the instruction itself asks for that generic view.\n\n"
         "Your code must construct a `policy_trace` before retrieval and then execute retrieval "
         "according to that trace. In the trace, record which analysis-driven needs were "
         "implemented, which were skipped, what fallback logic was used, and how evidence was "

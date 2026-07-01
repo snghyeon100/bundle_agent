@@ -42,12 +42,15 @@ def llm_provider(conf):
     return str(conf.get("llm_provider", "gemini")).strip().lower()
 
 
+def default_api_key_envs_for_provider(provider):
+    return ["OPENAI_API_KEY"] if provider == "openai" else ["GEMINI_API_KEY", "GOOGLE_API_KEY"]
+
+
 def default_api_key_envs(conf):
-    return ["OPENAI_API_KEY"] if llm_provider(conf) == "openai" else ["GEMINI_API_KEY", "GOOGLE_API_KEY"]
+    return default_api_key_envs_for_provider(llm_provider(conf))
 
 
-def create_llm_client(conf, api_key):
-    provider = llm_provider(conf)
+def create_llm_client(provider, api_key):
     if provider == "gemini":
         return genai.Client(api_key=api_key)
     if provider == "openai":
@@ -56,18 +59,68 @@ def create_llm_client(conf, api_key):
     raise ValueError(f"Unsupported llm_provider: {provider}")
 
 
+STAGE_CONFIG = {
+    "analysis": {
+        "provider_keys": ["sem_analysis_provider"],
+        "model_keys": ["sem_analysis_model"],
+    },
+    "stage1": {
+        "provider_keys": ["sem_evidence_provider", "sem_stage1_provider"],
+        "model_keys": ["sem_evidence_model", "sem_stage1_model"],
+    },
+    "stage2": {
+        "provider_keys": ["sem_summary_provider", "sem_stage2_provider"],
+        "model_keys": ["sem_summary_model", "sem_stage2_model"],
+    },
+    "prediction": {
+        "provider_keys": ["sem_decision_provider", "sem_prediction_provider"],
+        "model_keys": ["sem_decision_model", "sem_prediction_model"],
+    },
+}
+
+
+def _first_config_value(conf, keys, default=""):
+    for key in keys:
+        value = str(conf.get(key, "")).strip()
+        if value:
+            return value
+    return default
+
+
+def stage_provider(conf, role):
+    keys = STAGE_CONFIG.get(role, {}).get("provider_keys", [])
+    return _first_config_value(conf, keys, llm_provider(conf)).lower()
+
+
+def stage_model(conf, role):
+    keys = STAGE_CONFIG.get(role, {}).get("model_keys", [])
+    model = _first_config_value(conf, keys, str(conf.get("model", "")).strip())
+    if not model:
+        raise ValueError(f"No model configured for role {role}")
+    return model
+
+
 def resolve_api_key(conf, config_key, fallback_envs):
-    configured = str(conf.get(config_key, "")).strip()
-    if configured:
-        value = os.getenv(configured, "").strip()
-        if not value:
-            raise ValueError(f"API key env var not set: {configured}")
-        return value, configured
+    return resolve_api_key_from_keys(conf, [config_key], fallback_envs)
+
+
+def resolve_api_key_from_keys(conf, config_keys, fallback_envs):
+    for config_key in config_keys:
+        configured = str(conf.get(config_key, "")).strip()
+        if configured:
+            value = os.getenv(configured, "").strip()
+            if not value:
+                raise ValueError(f"API key env var not set: {configured} (configured by {config_key})")
+            return value, configured
     for env in fallback_envs:
         value = os.getenv(env, "").strip()
         if value:
             return value, env
-    raise ValueError(f"None of these API key env vars are set: {', '.join(fallback_envs)}")
+    configured_keys = ", ".join(config_keys)
+    raise ValueError(
+        f"No API key configured via [{configured_keys}], and none of these fallback env vars are set: "
+        f"{', '.join(fallback_envs)}"
+    )
 
 
 def is_quota_error(exc):
@@ -82,9 +135,23 @@ def is_retryable_error(exc):
                                    "temporarily unavailable", "try again later"))
 
 
+def _client_provider(client, conf):
+    if isinstance(client, dict):
+        return str(client.get("provider", llm_provider(conf))).strip().lower()
+    return llm_provider(conf)
+
+
+def _client_obj(client):
+    if isinstance(client, dict):
+        return client.get("client")
+    return client
+
+
 async def call_llm_once(client, model, contents, conf, max_output_tokens):
-    if llm_provider(conf) == "gemini":
-        response = await client.aio.models.generate_content(
+    provider = _client_provider(client, conf)
+    llm_client = _client_obj(client)
+    if provider == "gemini":
+        response = await llm_client.aio.models.generate_content(
             model=model,
             contents=contents,
             config={
@@ -103,7 +170,7 @@ async def call_llm_once(client, model, contents, conf, max_output_tokens):
         request["reasoning"] = {"effort": effort}
     if bool(conf.get("openai_send_temperature", False)):
         request["temperature"] = float(conf.get("temperature", 0.0))
-    response = await client.responses.create(**request)
+    response = await llm_client.responses.create(**request)
     return getattr(response, "output_text", "") or ""
 
 
@@ -147,15 +214,67 @@ def print_debug(title, prompt):
 # Results I/O
 # ---------------------------------------------------------------------------
 
-def result_path(conf, timestamp, partial=False):
-    directory = os.path.join(conf["output_dir"], conf["dataset"])
+def run_output_dir(conf, timestamp):
+    directory = os.path.join(conf["output_dir"], conf["dataset"], timestamp)
     os.makedirs(directory, exist_ok=True)
-    suffix = "_partial" if partial else ""
-    filename = (
-        f"results_{conf['dataset']}_{METHOD_NAME}_"
-        f"C{conf.get('num_cans', '')}_T{conf.get('num_token', '')}_{timestamp}{suffix}.csv"
-    )
-    return os.path.join(directory, filename)
+    return directory
+
+
+def result_path(conf, timestamp, partial=False):
+    filename = "results_partial.csv" if partial else "results.csv"
+    return os.path.join(run_output_dir(conf, timestamp), filename)
+
+
+def _format_id_list(values):
+    return ";".join(str(int(v)) for v in values)
+
+
+def _format_candidate_ids(values):
+    labels = [chr(ord("A") + i) for i in range(len(values))]
+    return ";".join(f"{label}:{int(item_id)}" for label, item_id in zip(labels, values))
+
+
+def compact_result_row(row):
+    return {
+        "bundle_id": int(row.get("bundle_id", -1)),
+        "partial_item_ids": _format_id_list(row.get("input_indices", [])),
+        "candidate_item_ids": _format_candidate_ids(row.get("candidate_indices", [])),
+        "prediction": row.get("prediction", ""),
+        "gt_label": row.get("true_option_char", ""),
+        "gt_item_id": row.get("true_indice", ""),
+        "hit": int(row.get("hit", 0)),
+    }
+
+
+def _write_text(path, text):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(str(text or ""))
+
+
+def save_stage_artifacts(row, conf, timestamp):
+    bundle_id = row.get("bundle_id", "unknown")
+    base = os.path.join(run_output_dir(conf, timestamp), f"bundle_{bundle_id}")
+    stage_specs = [
+        ("stage0_analysis", "sem_analysis_prompt", "sem_analysis_raw_response", None),
+        ("stage1_evidence", "sem_s1_prompt", "sem_s1_raw_response", "sem_s1_generated_code"),
+        ("stage2_summary", "sem_s2_prompt", "sem_s2_raw_response", "sem_s2_generated_code"),
+        ("stage3_decision", "sem_decision_prompt", "sem_decision_raw_response", None),
+    ]
+    for stage_name, input_key, output_key, code_key in stage_specs:
+        stage_dir = os.path.join(base, stage_name)
+        if input_key in row:
+            _write_text(os.path.join(stage_dir, "input.txt"), row.get(input_key, ""))
+        if output_key in row:
+            _write_text(os.path.join(stage_dir, "output.txt"), row.get(output_key, ""))
+        if code_key and str(row.get(code_key, "")).strip():
+            _write_text(os.path.join(stage_dir, "code.py"), row.get(code_key, ""))
+
+
+def save_error_artifact(row, conf, timestamp, error_text):
+    bundle_id = row.get("bundle_id", "unknown")
+    path = os.path.join(run_output_dir(conf, timestamp), f"bundle_{bundle_id}", "errors", "output.txt")
+    _write_text(path, error_text)
 
 
 def save_results(results, conf, timestamp, partial=False):
@@ -167,22 +286,18 @@ def save_results(results, conf, timestamp, partial=False):
     valid_hit_rate = frame.loc[valid_mask, "hit"].mean() if valid_mask.sum() else 0.0
 
     if not frame.empty:
-        frame["overall_hit_rate"] = hit_rate
-        frame["overall_valid_ratio"] = valid_ratio
-        frame["valid_only_hit_rate"] = valid_hit_rate
-        # Record config fields
-        config_fields = [
-            "method", "dataset", "num_cans", "num_token", "toy_eval", "seed",
-            "shuffle_seed", "llm_provider", "model", "temperature",
-            "sem_code_max_output_tokens", "sem_prediction_max_output_tokens",
-            "sem_code_max_repair_attempts", "sem_max_evidence_chars",
-            "sem_current_bundle_train_context_policy",
-            "sem_code_timeout_seconds", "sem_enable_code_guard",
+        frame["accuracy"] = hit_rate
+        columns = [
+            "bundle_id",
+            "partial_item_ids",
+            "candidate_item_ids",
+            "prediction",
+            "gt_label",
+            "gt_item_id",
+            "hit",
+            "accuracy",
         ]
-        for field in config_fields:
-            frame[f"cfg_{field}"] = conf.get(field, "")
-        frame["cfg_max_retries"] = conf.get("max_retries", "")
-        frame["cfg_retry_wait_seconds"] = conf.get("retry_wait_seconds", "")
+        frame = frame[[col for col in columns if col in frame.columns]]
 
     path = result_path(conf, timestamp, partial)
     frame.to_csv(path, index=False, encoding="utf-8-sig")
@@ -213,16 +328,21 @@ async def process_samples(clients, samples, conf, timestamp, initial_results=Non
                     is_first_sample=(current_idx == start_idx),
                 )
                 row.update(updates)
+                row["prediction"] = prediction
+                row["raw_response"] = raw_response
+                row["hit"] = int(prediction == sample["true_option_char"])
+                save_stage_artifacts(row, conf, timestamp)
             except QuotaExceededError:
                 raise
             except Exception as exc:
                 prediction = "ERR_EX"
                 raw_response = str(exc)
-        row["prediction"] = prediction
-        row["raw_response"] = raw_response
-        row["hit"] = int(prediction == sample["true_option_char"])
+                row["prediction"] = prediction
+                row["raw_response"] = raw_response
+                row["hit"] = int(prediction == sample["true_option_char"])
+                save_error_artifact(row, conf, timestamp, raw_response)
         print(f"[{current_idx + 1}/{total}] True: {sample['true_option_char']} | Pred: {prediction}")
-        return row
+        return compact_result_row(row)
 
     for offset in range(0, len(samples), concurrency):
         chunk = samples[offset: offset + concurrency]
@@ -238,25 +358,34 @@ async def process_samples(clients, samples, conf, timestamp, initial_results=Non
 
 
 def _build_clients(conf):
-    fallback = default_api_key_envs(conf)
     clients = {}
     resolved = {}
-    prior = []
-    # sem_agent uses four roles: analysis, evidence, summary, and prediction.
+    prior_by_provider = {}
+    # sem_agent uses four roles: analysis, evidence retrieval, summary, and decision.
+    # New explicit keys are preferred; legacy keys remain as fallbacks for old configs.
     role_keys = [
-        ("analysis", "sem_analysis_api_key_env", "sem_code_api_key_env"),
-        ("stage1", "sem_stage1_api_key_env", "sem_code_api_key_env"),
-        ("stage2", "sem_stage2_api_key_env", "sem_code_api_key_env"),
-        ("prediction", "sem_prediction_api_key_env", None),
+        ("analysis", ["sem_analysis_api_key_env", "sem_code_api_key_env"]),
+        ("stage1", ["sem_evidence_api_key_env", "sem_stage1_api_key_env", "sem_code_api_key_env"]),
+        ("stage2", ["sem_summary_api_key_env", "sem_stage2_api_key_env", "sem_code_api_key_env"]),
+        ("prediction", ["sem_decision_api_key_env", "sem_prediction_api_key_env"]),
     ]
-    for role, key, legacy_key in role_keys:
-        config_key = key
-        if not str(conf.get(config_key, "")).strip() and legacy_key:
-            config_key = legacy_key
-        api_key, env = resolve_api_key(conf, config_key, prior + fallback)
-        clients[role] = create_llm_client(conf, api_key)
-        resolved[role] = env
-        prior.append(env)
+    for role, config_keys in role_keys:
+        provider = stage_provider(conf, role)
+        model = stage_model(conf, role)
+        fallback = default_api_key_envs_for_provider(provider)
+        prior = prior_by_provider.get(provider, [])
+        api_key, env = resolve_api_key_from_keys(conf, config_keys, prior + fallback)
+        clients[role] = {
+            "client": create_llm_client(provider, api_key),
+            "provider": provider,
+            "model": model,
+        }
+        resolved[role] = {
+            "api_key_env": env,
+            "provider": provider,
+            "model": model,
+        }
+        prior_by_provider.setdefault(provider, []).append(env)
     return clients, resolved
 
 
@@ -295,6 +424,10 @@ def main():
         m = re.search(r"_(\d{8}_\d{6})(?:_partial)?\.csv$", args.resume)
         if m:
             timestamp = m.group(1)
+        else:
+            parent = os.path.basename(os.path.dirname(os.path.abspath(args.resume)))
+            if parent:
+                timestamp = parent
     if args.start_idx > 0:
         samples = samples[args.start_idx:]
 
@@ -308,9 +441,12 @@ def main():
     except ValueError as exc:
         print(f"[Error] {exc}")
         return 1
-    print(f">>> LLM provider: {llm_provider(conf)}")
-    for role, env in resolved.items():
-        print(f">>> {role.title()} API key env: {env}")
+    print(f">>> Default LLM provider: {llm_provider(conf)}")
+    for role, info in resolved.items():
+        print(
+            f">>> {role.title()}: provider={info['provider']} "
+            f"model={info['model']} api_key_env={info['api_key_env']}"
+        )
 
     try:
         results = asyncio.run(

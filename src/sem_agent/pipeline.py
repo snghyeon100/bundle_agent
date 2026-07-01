@@ -22,6 +22,7 @@ from .common import (
     task_semantics,
 )
 from .workspace import (
+    build_analysis_recon,
     build_source_manifest,
     execute_generated_code,
     execution_needs_repair,
@@ -44,9 +45,10 @@ CONFIG_PREFIX = "sem"
 # ---------------------------------------------------------------------------
 
 async def _call_stage(generate_content_fn, client, conf, prompt, max_tokens_key, default_tokens, step_name):
+    model = client.get("model") if isinstance(client, dict) else conf["model"]
     return await generate_content_fn(
         client,
-        conf["model"],
+        model,
         prompt,
         conf,
         conf.get(max_tokens_key, default_tokens),
@@ -448,6 +450,7 @@ async def run_sem_agent(
         workspace,
         str(conf.get("sem_current_bundle_train_context_policy", "allow")),
     )
+    data_recon = build_analysis_recon(workspace, case_view)
     max_chars = int(conf.get("sem_max_evidence_chars", 30000))
     decision_case = build_decision_case(sample, conf)
 
@@ -458,6 +461,7 @@ async def run_sem_agent(
         case_view,
         source_manifest,
         semantic_case=decision_case,
+        data_recon=data_recon,
     )
     if is_first_sample and debug_callback:
         debug_callback("Sem Agent Problem Analysis Prompt", analysis_prompt)

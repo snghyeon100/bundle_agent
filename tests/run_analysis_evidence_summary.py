@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
 from dataset import BundleZeroShotDataset, set_seed
 from main import _build_clients, generate_content_with_retry
 from sem_agent.common import build_case_view, candidate_labels, compact_json, parse_json_from_text
-from sem_agent.workspace import prepare_workspace, build_source_manifest
+from sem_agent.workspace import build_analysis_recon, prepare_workspace, build_source_manifest
 from sem_agent.prompts import problem_analysis_prompt, stage1_ecosystem_prompt, stage2_gap_prompt
 from sem_agent.pipeline import (
     _call_stage,
@@ -37,10 +37,16 @@ async def run_analysis_evidence_summary(conf, sample, clients):
         workspace,
         str(conf.get("sem_current_bundle_train_context_policy", "allow")),
     )
+    data_recon = build_analysis_recon(workspace, case_view)
     max_chars = int(conf.get("sem_max_evidence_chars", 30000))
     
     print("\n[Problem Analysis] Executing...")
-    analysis_prompt = problem_analysis_prompt(case_view, source_manifest, semantic_case=semantic_case)
+    analysis_prompt = problem_analysis_prompt(
+        case_view,
+        source_manifest,
+        semantic_case=semantic_case,
+        data_recon=data_recon,
+    )
     analysis_raw = await _call_stage(
         generate_content_with_retry,
         clients["analysis"],
