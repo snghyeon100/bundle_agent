@@ -304,6 +304,7 @@ async def _generate_execute_repair(
     workspace,
     output_file,
     labels,
+    problem_analysis=None,
 ):
     max_tokens_key = "sem_stage1_max_output_tokens"
     default_tokens = 4000
@@ -337,6 +338,7 @@ async def _generate_execute_repair(
         prompt = repair_prompt(
             case_view, source_manifest, code, ctx, output_file,
             require_relation_path=require_rpath,
+            problem_analysis=problem_analysis,
         )
         repair_raw = await _call_stage(
             generate_content_fn, client, conf, prompt,
@@ -504,6 +506,7 @@ async def run_sem_agent(
         workspace=workspace,
         output_file=s1_output_file,
         labels=labels,
+        problem_analysis=analysis_raw,
     )
 
     stage1_full_output = s1_result["accepted_evidence"] or {"signals": []}

@@ -67,8 +67,8 @@ def _unified_case_context(case_view, semantic_case=None):
 def _enriched_case_context(case_view, semantic_case=None, data_recon=None):
     unified = _unified_case_context(case_view, semantic_case)
     data_recon = data_recon or {}
-    partial_recon = data_recon.get("partial_items", {})
-    candidate_recon = data_recon.get("candidates", {})
+    partial_recon = data_recon.get("partial_item_diagnostic") or data_recon.get("partial_items", {})
+    candidate_recon = data_recon.get("candidate_level_diagnostic") or data_recon.get("candidates", {})
 
     for item in unified.get("partial_items", []):
         metadata = item.pop("metadata", {}) if isinstance(item.get("metadata"), dict) else {}
@@ -88,8 +88,16 @@ def _enriched_case_context(case_view, semantic_case=None, data_recon=None):
         if recon:
             item["recon"] = recon
 
-    if data_recon.get("partial_set"):
+    if data_recon.get("sample_level_diagnostic"):
+        unified["sample_level_diagnostic"] = data_recon.get("sample_level_diagnostic")
+    elif data_recon.get("partial_set"):
         unified["partial_set_recon"] = data_recon.get("partial_set")
+    if data_recon.get("partial_item_diagnostic"):
+        unified["partial_item_diagnostic"] = data_recon.get("partial_item_diagnostic")
+    if data_recon.get("candidate_level_diagnostic"):
+        unified["candidate_level_diagnostic"] = data_recon.get("candidate_level_diagnostic")
+    if data_recon.get("aggregate_candidate_diagnostic"):
+        unified["aggregate_candidate_diagnostic"] = data_recon.get("aggregate_candidate_diagnostic")
     if data_recon.get("recon_legend"):
         unified["recon_legend"] = data_recon.get("recon_legend")
     if data_recon.get("sources_read"):
@@ -113,12 +121,17 @@ def problem_analysis_prompt(case_view, source_manifest, semantic_case=None, data
         "instance so that a later evidence-retrieval agent can retrieve sample-adaptive evidence.\n\n"
         "Analyze what needs to be understood about this instance in order to retrieve useful, "
         "source-grounded evidence for the partial item(s) and each candidate. Decide for yourself "
-        "what aspects of the problem are important. The analysis should be specific to this sample, "
-        "not generic advice for all bundle-completion tasks.\n\n"
+        "what aspects of the problem are important. The analysis should be specific to this "
+        "sample while staying grounded in the bundle-completion task: identify what evidence "
+        "would clarify compatibility, complementarity, item roles, and missing-bundle context "
+        "for this partial bundle and its candidates. Avoid generic advice that would apply to "
+        "any sample.\n\n"
         "You will also be given a manifest of available data sources and a small deterministic "
         "data reconnaissance summary. Use the reconnaissance only to calibrate retrieval strategy "
         "around sparsity, category structure, and source availability. It is not final compatibility "
-        "evidence and should not be used to choose a candidate.\n\n"
+        "evidence and should not be used to choose a candidate. Use recon findings to choose "
+        "`operator_hint`, requested `views`, `filters_or_grouping`, caps/diversity rules, and "
+        "`fallback` conditions for Stage 1 code synthesis; do not cite recon values as evidence.\n\n"
         "Important constraints:\n"
         "- Do not choose or rank candidates.\n"
         "- Do not judge candidate fit.\n"
@@ -138,38 +151,62 @@ def problem_analysis_prompt(case_view, source_manifest, semantic_case=None, data
         '  "strategy": {\n'
         '    "global": [\n'
         "      {\n"
-        '        "name": "short_unique_instruction_name",\n'
+        '        "name": "short_unique_strategy_name",\n'
+        '        "intent": "Why this evidence is needed for this sample, without judging fit.",\n'
         '        "paths": ["source_name.ext"],\n'
-        '        "anchor": "Concrete anchor such as partial item 6606, partial category, or a candidate label.",\n'
-        '        "operation": "Executable retrieval instruction, including what evidence view to output.",\n'
-        '        "filters": ["Sample-specific filters, grouping keys, title cues, categories, or fallback conditions."]\n'
+        '        "operator_hint": "Code-friendly retrieval pattern, e.g. category_pair_bundles, embedding_neighbors, neighbor_then_bundle_intersection, same_category_multiuse, keyword_filtered_bundles, co_bundle_context.",\n'
+        '        "anchors": {\n'
+        '          "partial_items": ["item ids or labels"],\n'
+        '          "candidates": ["candidate labels if applicable"],\n'
+        '          "categories": ["category ids or category roles if applicable"],\n'
+        '          "keywords": ["title/style/season/motif cues if useful"]\n'
+        "        },\n"
+        '        "operation": "Executable retrieval instruction for Stage 1 code synthesis.",\n'
+        '        "views": ["Separate evidence views to output, e.g. counts, representative_bundle_titles, neighbor_titles, co_occurring_item_titles, sparse_note"],\n'
+        '        "filters_or_grouping": ["Sample-specific filters, grouping keys, caps, diversity rules, or category constraints."],\n'
+        '        "fallback": "Fallback retrieval to use if the primary view is sparse or unavailable."\n'
         "      }\n"
         "    ],\n"
         '    "candidate": {\n'
         '      "A": [\n'
         "        {\n"
-        '          "name": "short_unique_candidate_instruction_name",\n'
+        '          "name": "short_unique_candidate_strategy_name",\n'
+        '          "intent": "Why this candidate needs this evidence, without judging fit.",\n'
         '          "paths": ["source_name.ext"],\n'
-        '          "anchor": "Candidate A and any relevant partial anchor.",\n'
-        '          "operation": "Candidate-specific retrieval instruction, not a fit judgment.",\n'
-        '          "filters": ["Candidate-specific filters or grouping keys."]\n'
+        '          "operator_hint": "Code-friendly retrieval pattern.",\n'
+        '          "anchors": {\n'
+        '            "candidate_item": "item id",\n'
+        '            "candidate_category": "category id or role",\n'
+        '            "partial_items": ["item ids"],\n'
+        '            "partial_categories": ["category ids"],\n'
+        '            "keywords": ["candidate-specific title/style/season/motif cues"]\n'
+        "          },\n"
+        '          "operation": "Candidate-specific executable retrieval instruction, not a fit judgment.",\n'
+        '          "views": ["Separate evidence views to output for this candidate."],\n'
+        '          "filters_or_grouping": ["Candidate-specific filters, grouping keys, caps, or diversity rules."],\n'
+        '          "fallback": "Candidate-specific fallback retrieval if the primary view is sparse."\n'
         "        }\n"
         "      ]\n"
         "    }\n"
         "  }\n"
         "}\n\n"
-        "The `strategy.global` list should contain executable retrieval instructions useful across "
-        "the sample. Each instruction must name the source paths, anchor, operation, "
-        "and filters/grouping. The operation must include the evidence view to output. Avoid generic operations like plain nearest "
+        "The `strategy.global` list should contain code-friendly retrieval specs useful across "
+        "the sample. Each spec must name source paths, `operator_hint`, concrete `anchors`, "
+        "`operation`, requested `views`, filters/grouping, and fallback. `operator_hint` is a "
+        "hint for the later code generator, not a closed vocabulary; choose the simplest reusable "
+        "retrieval pattern that fits the evidence need. Avoid generic operations like plain nearest "
         "neighbors unless you add sample-specific anchors, filters, clusters, or aggregation. "
         "The `strategy.candidate` object should only mention candidates that need special retrieval "
         "because of role, category overlap, sparsity, season/style cues, motif cues, or other "
-        "sample-specific issues, and each entry must use the same executable instruction format.\n\n"
+        "sample-specific issues, and each entry must use the same code-friendly spec format. "
+        "Use multiple `views` when one strategy needs multiple retrieval substeps; the later "
+        "evidence stage should be able to output one evidence string per view.\n\n"
         f"{task_semantics(case_view['dataset'])}\n\n"
         "Enriched case context (IDs/text/category plus deterministic planning recon):\n"
         f"{_dump(_enriched_case_context(case_view, semantic_case, data_recon))}\n\n"
         "Recon fields are planning inputs, not final compatibility evidence. Use item-level "
-        "`recon` fields for candidate-specific strategy and `partial_set_recon` for global strategy. "
+        "`recon` fields and `candidate_level_diagnostic` patterns for candidate-specific strategy; "
+        "use `sample_level_diagnostic` and `aggregate_candidate_diagnostic` for global strategy. "
         "Use `recon_legend` to interpret recon field names.\n\n"
         f"Source Capability Manifest:\n{_dump(source_manifest)}"
     )
@@ -190,55 +227,56 @@ def stage1_ecosystem_prompt(
     """Stage 1: Item Evidence Expansion Builder.
 
     The code generator retrieves item-level supporting evidence and encodes it as
-    pure-text narratives — no bare numeric values allowed.
+    compact source-grounded evidence strings. Numeric counts/ratios are allowed
+    only when tied to a named retrieval view, not as final scores.
     """
     labels = ", ".join(candidate_labels(case_view))
 
     semantic_goals = (
-        "STAGE 1 TASK - Analysis-Conditioned Sample-Adaptive Evidence Code Generation\n"
-        "You are a Python code generator for retrieving sample-adaptive evidence for each "
-        "partial-bundle item and each candidate item. Use the given Problem Analysis as the "
-        "primary guide for what this sample needs. Convert that analysis into executable, "
-        "source-grounded retrieval code using the available workspace files. The Problem "
-        "Analysis is not evidence; it is a retrieval plan and diagnostic guide.\n\n"
-        "Choose source paths, fallback paths, and evidence views according to the analysis, "
-        "source availability, item roles, and evidence sparsity. Do not replace the analysis "
-        "with a generic fixed recipe, and do not redo final-answer reasoning. Keep candidates "
-        "comparable in output format and evidence granularity, but allow candidate-specific "
-        "retrieval paths or evidence views whenever the Problem Analysis, item role, source "
-        "availability, or evidence sparsity makes them useful.\n\n"
-        "If the Problem Analysis provides executable strategy objects with fields such as "
-        "`name`, `paths`, `anchor`, `operation`, and `filters` (or `filters_or_grouping`), "
-        "treat them as the main retrieval contract. For each `strategy.global` or legacy "
-        "`global_strategy` instruction, "
-        "implement at least one evidence view that reflects its anchor plus filters/grouping, "
-        "or record the instruction name and concrete skip reason in `skipped_analysis_needs`. "
-        "For each candidate listed under `strategy.candidate` or legacy `candidate_strategy`, implement at least one "
-        "candidate-specific evidence string tied to that instruction, or record the exact "
-        "instruction name and reason it was skipped. Do not satisfy an executable strategy "
-        "with the same generic nearest-neighbor or co-bundle template for every item unless "
-        "the instruction itself asks for that generic view.\n\n"
-        "Your code must construct a `policy_trace` before retrieval and then execute retrieval "
-        "according to that trace. In the trace, record which analysis-driven needs were "
-        "implemented, which were skipped, what fallback logic was used, and how evidence was "
-        "represented. Evidence may use grouped examples, category/role concentration, source "
-        "sparsity, broad-source warnings, source agreement or disagreement, high-fanout-filtered "
-        "contexts, or representative anchors. Use statistics inside the code when useful, but "
-        "output compact qualitative evidence strings rather than bare numeric scores.\n\n"
+        "STAGE 1 TASK - Analysis-Conditioned Evidence Code Generation\n"
+        "A partial bundle and multiple candidate items are given. The final task of the full "
+        "system is to choose which candidate item should be added to the partial bundle.\n\n"
+        "Your role is not to answer the task. Generate complete Python code that retrieves "
+        "source-grounded evidence for the partial item(s) and every candidate. Do not choose, "
+        "rank, recommend, or judge candidate fit.\n\n"
+        "Treat the Problem Analysis `strategy` section as the retrieval program spec for this "
+        "sample. For every named global or candidate strategy, copy its exact name into "
+        "`GLOBAL_PLAN` or `CANDIDATE_PLAN` and preserve its `operator_hint`, anchors, operation, "
+        "views, filters/grouping, and fallback. Either implement each requested view with "
+        "available workspace sources or record the exact strategy/view name and concrete "
+        "data/source reason in `skipped_analysis_needs`.\n\n"
+        "Do not replace sample-specific strategies with a generic nearest-neighbor, similarity, "
+        "metadata, or co-bundle recipe unless the strategy asks for that view. Use "
+        "`operator_hint` as the main dispatch hint in `run_strategy`; if an older analysis lacks "
+        "`operator_hint`, infer the closest retrieval pattern from `operation`, `paths`, and "
+        "anchors. Keep candidate evidence comparable: apply relevant global strategies across "
+        "candidates, and add candidate-specific views only where the Problem Analysis asks for "
+        "them.\n\n"
+        "Build `policy_trace` from the exact Problem Analysis strategy names before retrieval. "
+        "For each name, record implemented retrieval paths, skipped subviews, and fallbacks used. "
+        "Use grouped examples, category/role concentration, source sparsity, source agreement or "
+        "disagreement, high-fanout-filtered contexts, representative anchors, counts, ratios, or "
+        "similarities only when they are tied to a named retrieval view. A generated program "
+        "should synthesize code from the strategy specs, not rewrite them into a different "
+        "generic plan.\n\n"
 
         "EVIDENCE STRING RULES\n"
         "For every target item, output evidence strings grounded in retrieved item titles or metadata. "
-        "Every evidence string must disclose its path/view in the prefix before ':', for example "
-        "'base co-bundle profile via bundle 11186: item title 1; item title 2', "
-        "'fallback text-neighbor profile: item title 1; item title 2', or "
-        "'sparse co-bundle evidence: no historical co-bundle items found'. "
+        "Every evidence string must use this compact format: "
+        "`retrieval path/source signal/anchor: grounded title list or sparse-evidence note`. "
+        "If a strategy requests multiple `views` or contains multiple retrieval substeps, output "
+        "separate evidence strings for the meaningful subviews instead of compressing the whole "
+        "strategy into one title list. "
         "Group evidence by retrieval signal, view, or anchor. For each evidence string/group, include "
-        "at most 5 representative item titles. For high-fanout groups, append a compact note such as "
+        "at most 5 representative item titles in total. If no grounded item titles are available, "
+        "use a sparse-evidence note. For high-fanout groups, append a compact note such as "
         "'(+1432 more items not shown)'.\n\n"
 
-        "Do not output `value`, `description`, `sources`, `relation_path`, raw scores, "
-        "rankings, predictions, fit judgments, or final recommendations. Stage 1 output should "
-        "keep only `signal_scope` and evidence arrays.\n\n"
+        "Do not output `value`, `description`, `sources`, `relation_path`, rankings, "
+        "predictions, fit judgments, or final recommendations. Do not output ungrounded raw "
+        "scores. Counts, ratios, or similarities are allowed only when an analysis instruction "
+        "asks for them and the evidence string names the retrieval path and what was counted or "
+        "compared. Stage 1 output should keep only `signal_scope` and evidence arrays.\n\n"
 
         "STAGE 1 OUTPUT STRUCTURE\n"
         "Produce JSON with `policy_trace` for audit/debug and exactly these two signal shapes. "
@@ -246,9 +284,9 @@ def stage1_ecosystem_prompt(
         "retrieval program.\n"
         "{\n"
         '  "policy_trace": {\n'
-        '    "analysis_driven_needs": ["sample-specific retrieval need taken from the Problem Analysis"],\n'
-        '    "implemented_retrieval_paths": ["source-grounded retrieval path implemented in code"],\n'
-        '    "skipped_analysis_needs": ["analysis-suggested retrieval need not implemented, with a short reason"],\n'
+        '    "analysis_driven_needs": ["exact strategy instruction name from the Problem Analysis"],\n'
+        '    "implemented_retrieval_paths": ["exact instruction name -> source-grounded retrieval path implemented in code"],\n'
+        '    "skipped_analysis_needs": ["exact instruction name/subview -> concrete data or source reason skipped"],\n'
         '    "fallbacks": ["fallback rule used only for sparse evidence or item-role mismatch"],\n'
         '    "evidence_view_policy": ["how selected source evidence is represented, e.g. grouped examples or sparsity notes"]\n'
         "  },\n"
@@ -257,7 +295,7 @@ def stage1_ecosystem_prompt(
         '      "signal_scope": "partial_bundle",\n'
         '      "observation": {\n'
         '        "evidence": [\n'
-        '          "Path or anchor name: item title 1; item title 2; item title 3"\n'
+        '          "evidence string following EVIDENCE STRING RULES"\n'
         "        ]\n"
         "      }\n"
         "    },\n"
@@ -266,28 +304,61 @@ def stage1_ecosystem_prompt(
         '      "candidate_observations": {\n'
         '        "A": {\n'
         '          "evidence": [\n'
-        '            "Path or anchor name: item title 1; item title 2; item title 3"\n'
+        '            "evidence string following EVIDENCE STRING RULES"\n'
         "          ]\n"
         "        }\n"
         "      }\n"
         "    }\n"
         "  ]\n"
         "}\n"
-        "For every evidence string, the prefix before ':' must describe the actual "
-        "retrieval path, source signal, or anchor used by the generated code.\n"
         "Do not write detailed narratives, fit judgments, rankings, "
         "predictions, or final recommendations in Stage 1.\n\n"
 
         "IMPLEMENTATION NOTES\n"
-        "- You are FREE to choose any traversal paths through the available sources "
-        "to implement this task. The task is a semantic target, not an algorithmic "
-        "prescription.\n"
+        "- If the Problem Analysis provides strategy instructions, follow them as the "
+        "sample-specific retrieval contract.\n"
+        "- Preserve each strategy dict from the Problem Analysis as plan config when possible; "
+        "`GLOBAL_PLAN` and `CANDIDATE_PLAN` should expose `name`, `operator_hint`, `anchors`, "
+        "`views`, and fallback details to `run_strategy`.\n"
         "- Treat the listed sources as a relation graph, not as isolated files. You can compose relations when useful to retrieve supporting items.\n"
         "- CPU-only: load every .pt file with torch.load(..., map_location=\"cpu\"). "
         "If a tensor requires gradients, call detach() before numpy().\n"
         "- Keep numpy arrays as numpy arrays while using numpy attributes such as `.size`, "
         "`.shape`, or boolean indexing. If you convert an array to a Python list, use "
         "`len(list_value)` instead of `.size` and do not call `.tolist()` on it again.\n"
+        "\n"
+        "REQUIRED SCRIPT SHAPE\n"
+        "Use this high-level script structure. You may adapt helper internals, but keep this shape:\n"
+        "```python\n"
+        "def main():\n"
+        "    sources = load_sources()\n"
+        "    indexes = build_indexes(sources)\n"
+        "    policy_trace = init_policy_trace(GLOBAL_PLAN, CANDIDATE_PLAN)\n"
+        "\n"
+        "    partial_evidence = []\n"
+        "    for cfg in GLOBAL_PLAN:\n"
+        "        partial_evidence.extend(run_strategy(cfg, indexes, scope='partial_bundle'))\n"
+        "\n"
+        "    candidate_evidence = {label: [] for label in REQUIRED_LABELS}\n"
+        "    for label in REQUIRED_LABELS:\n"
+        "        for cfg in CANDIDATE_PLAN.get(label, []):\n"
+        "            candidate_evidence[label].extend(run_strategy(cfg, indexes, scope='candidate', label=label))\n"
+        "        if not candidate_evidence[label]:\n"
+        "            candidate_evidence[label].append(make_sparse_note(label))\n"
+        "\n"
+        "    output_obj = build_output(policy_trace, partial_evidence, candidate_evidence)\n"
+        "    write_json(output_obj, OUTPUT_PATH)\n"
+        "\n"
+        "if __name__ == '__main__':\n"
+        "    main()\n"
+        "```\n"
+        "`run_strategy` should dispatch primarily on `cfg['operator_hint']` and then on "
+        "`cfg['name']` when needed for sample-specific details. For each requested view in "
+        "`cfg['views']`, either append a separate evidence string or record that exact "
+        "strategy/view in `policy_trace['skipped_analysis_needs']`.\n"
+        "Do not emit partial code. If a strategy is complex, implement a simpler "
+        "source-grounded approximation through `run_strategy` and record skipped subviews "
+        "in `policy_trace`.\n"
     )
 
     return (
@@ -296,7 +367,7 @@ def stage1_ecosystem_prompt(
         "The script runs with the allowed workspace as its current directory.\n"
         f"The script must write UTF-8 JSON to exactly this path: {output_file}\n\n"
         f"{task_semantics(case_view['dataset'])}\n\n"
-        f"Problem Analysis Guidance (not evidence; do not copy it as evidence):\n"
+        f"Problem Analysis Retrieval Contract (not evidence; do not copy it as evidence):\n"
         f"{problem_analysis or '(none provided)'}\n\n"
         f"{semantic_goals}\n"
         #f"{_shared_rules(output_file, labels, max_evidence_chars)}\n"
@@ -515,6 +586,7 @@ def repair_prompt(
     execution_context,
     output_file,
     require_relation_path=False,
+    problem_analysis=None,
 ):
     labels = ", ".join(candidate_labels(case_view))
     relation_path_rule = ""
@@ -526,8 +598,19 @@ def repair_prompt(
     return (
         "You are repairing Python signal-extraction code. Return ONLY complete executable "
         "Python code — no markdown fences, no explanation.\n"
-        "Fix execution errors or JSON schema defects. "
-        "Preserve the original semantic investigation intent.\n"
+        "Fix execution errors, JSON schema defects, or analysis-contract coverage defects. "
+        "Preserve the Problem Analysis retrieval contract when it is provided; do not treat "
+        "the previous code as authoritative if it omitted or weakened analysis instructions.\n"
+        "If the Problem Analysis contains code-friendly strategy specs with fields such as "
+        "`operator_hint`, `anchors`, `views`, `filters_or_grouping`, and `fallback`, preserve "
+        "those fields in `GLOBAL_PLAN` or `CANDIDATE_PLAN` and repair `run_strategy` to dispatch "
+        "from them. If a requested view is infeasible, skip that exact strategy/view with a "
+        "concrete data/source reason instead of dropping the whole strategy.\n"
+        "When repairing long or truncated code, prefer compact helper functions and config-driven "
+        "loops over repeated per-candidate blocks. Do not repair by continuing separate long "
+        "`try` blocks for candidates A-J; use a `CANDIDATE_PLAN` loop with shared helpers. "
+        "Always finish by assembling the final JSON object and writing it to the required "
+        "output path.\n"
         "CPU-only: torch.load(..., map_location=\"cpu\").\n\n"
         f"Script must write UTF-8 JSON to exactly: {output_file}\n"
         f"Required candidate labels for every candidate-scoped signal: {labels}\n\n"
@@ -535,10 +618,13 @@ def repair_prompt(
         "For `partial_bundle`, use one shared `observation` containing only `evidence`. "
         "For `candidate`, use `candidate_observations` with every required candidate label, "
         "and each label object must contain only `evidence`. Do not output `value`, "
-        "`description`, `sources`, `relation_path`, scores, rankings, or explanations. Evidence "
-        f"strings should preserve the sample-adaptive retrieval intent and may describe "
+        "`description`, `sources`, `relation_path`, rankings, or explanations. Do not output "
+        "ungrounded raw scores. Counts, ratios, or similarities are allowed only when tied to "
+        "a named retrieval path requested by the analysis. Evidence "
+        f"strings must preserve the sample-adaptive retrieval contract and may describe "
         f"compact evidence views such as base paths, fallback paths, sparsity, source agreement, "
-        f"or grouped representative anchors. Group items by the same retrieval path or view, such as "
+        f"or grouped representative anchors. If a strategy requests multiple views, output "
+        f"separate evidence strings for the meaningful views. Group items by the same retrieval path or view, such as "
         f"`base co-bundle profile via bundle 11186: item title 1; item title 2`. For high-fanout groups, "
         f"include up to 5 representative titles and append a count such as "
         f"`(+1432 more items not shown)`.{relation_path_rule}\n\n"
@@ -547,9 +633,9 @@ def repair_prompt(
         "`candidate_observations` only for candidate signals:\n"
         "{\n"
         '  "policy_trace": {\n'
-        '    "analysis_driven_needs": ["..."],\n'
-        '    "implemented_retrieval_paths": ["..."],\n'
-        '    "skipped_analysis_needs": ["..."],\n'
+        '    "analysis_driven_needs": ["exact strategy instruction name from the Problem Analysis"],\n'
+        '    "implemented_retrieval_paths": ["exact instruction name -> source-grounded retrieval path implemented in code"],\n'
+        '    "skipped_analysis_needs": ["exact instruction name/subview -> concrete data or source reason skipped"],\n'
         '    "fallbacks": ["..."],\n'
         '    "evidence_view_policy": ["..."]\n'
         "  },\n"
@@ -563,6 +649,7 @@ def repair_prompt(
         "    }\n"
         "  ]\n"
         "}\n\n"
+        f"Problem Analysis Retrieval Contract, if available:\n{problem_analysis or '(none provided)'}\n\n"
         f"ID-only case:\n{_dump(case_view)}\n\n"
         f"Source Capability Manifest:\n{_dump(source_manifest)}\n\n"
         f"Execution context and defects:\n{_dump(execution_context)}\n\n"

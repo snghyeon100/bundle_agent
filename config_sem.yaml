@@ -3,7 +3,7 @@
 # ============================================================
 
 # Dataset
-dataset: pog_dense                  # pog | pog_dense | spotify | spotify_sparse
+dataset: pog                  # pog | pog_dense | spotify | spotify_sparse
 data_path: ./datasets
 
 # Evaluation
@@ -30,7 +30,7 @@ sem_analysis_api_key_env: "OPENAI_API_KEY"  # Stage 0: Problem Analysis
 
 sem_evidence_provider: openai
 sem_evidence_model: gpt-5.1
-sem_evidence_api_key_env: "OPENAI_API_KEY"  # Stage 1: Evidence Retrieval code generation
+sem_evidence_api_key_env: "DMLAB_KEY"  # Stage 1: Evidence Retrieval code generation
 
 sem_summary_provider: gemini
 sem_summary_model: gemini-3-flash-preview
@@ -44,9 +44,9 @@ sem_decision_api_key_env: "GEMINI_API_KEY_3" # Stage 3: Final Decision
 # Problem analysis needs enough room to mention every candidate without truncation.
 sem_analysis_max_output_tokens: 4500
 # Legacy/general code budget; Stage 1 uses the stage-specific budget below.
-sem_code_max_output_tokens: 9000
+sem_code_max_output_tokens: 16000
 # Stage 1 generates executable retrieval code plus JSON-writing logic.
-sem_stage1_max_output_tokens: 9000
+sem_stage1_max_output_tokens: 16000
 # Stage 2 writes neutral A-J semantic profiles; keep ample but bounded.
 sem_stage2_max_output_tokens: 7000
 # Final decision should be a single label, but allow small JSON/format spillover.

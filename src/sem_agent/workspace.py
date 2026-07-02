@@ -341,6 +341,43 @@ def _item_metadata(meta):
     return out
 
 
+def _support_bucket(count):
+    if count is None:
+        return "unknown"
+    if count <= 0:
+        return "none"
+    if count <= 5:
+        return "low"
+    if count <= 50:
+        return "medium"
+    return "high"
+
+
+def _ratio_bucket(ratio):
+    if ratio is None:
+        return "unknown"
+    if ratio <= 0:
+        return "none"
+    if ratio < 0.05:
+        return "low"
+    if ratio < 0.20:
+        return "medium"
+    return "high"
+
+
+def _coverage_bucket(count, total):
+    if not total:
+        return "none"
+    ratio = count / total
+    if count <= 0:
+        return "none"
+    if ratio < 0.25:
+        return "low"
+    if ratio < 0.75:
+        return "medium"
+    return "high"
+
+
 def build_analysis_recon(workspace, case_view, max_scan_rows=None):
     """Build small, train-safe data reconnaissance for Stage 0 planning.
 
@@ -431,14 +468,16 @@ def build_analysis_recon(workspace, case_view, max_scan_rows=None):
                             if cand_cate and cand_cate in row_cate_counts:
                                 candidate_category_in_partial_context_rows[candidate["label"]] += 1
 
-    partial_recon = {
+    partial_item_diagnostic = {
         str(item_id): {
-            "train_bundle_count": item_bundle_counts.get(item_id, 0),
-            "category_bundle_count": partial_category_bundle_counts.get(cate_by_item.get(item_id, ""), 0),
+            "item_support": _support_bucket(item_bundle_counts.get(item_id, 0)),
+            "category_support": _support_bucket(
+                partial_category_bundle_counts.get(cate_by_item.get(item_id, ""), 0)
+            ),
         }
         for item_id in partial_ids
     }
-    candidate_recon = {}
+    candidate_level_diagnostic = {}
     for candidate in candidates:
         cand_cate = cate_by_item.get(candidate["item_id"], "")
         matching_partials = [
@@ -447,34 +486,63 @@ def build_analysis_recon(workspace, case_view, max_scan_rows=None):
         ]
         rows = candidate_category_in_partial_context_rows.get(candidate["label"], 0)
         ratio = rows / partial_category_context_bundle_rows if partial_category_context_bundle_rows else None
-        candidate_recon[candidate["label"]] = {
-            "train_bundle_count": item_bundle_counts.get(candidate["item_id"], 0),
-            "direct_bundle_count_with_partial_set": candidate_cooccurs_with_partial.get(candidate["label"], 0),
-            "shares_partial_category": bool(matching_partials),
+        candidate_level_diagnostic[candidate["label"]] = {
+            "item_support": _support_bucket(item_bundle_counts.get(candidate["item_id"], 0)),
+            "direct_partial_cobundle_support": _support_bucket(
+                candidate_cooccurs_with_partial.get(candidate["label"], 0)
+            ),
+            "category_overlap_with_partial": "yes" if matching_partials else "no",
             "candidate_category": cand_cate,
-            "matching_partial_item_ids": matching_partials,
-            "category_count_in_partial_context": rows,
-            "category_ratio_in_partial_context": ratio,
+            "category_context_support": _support_bucket(rows),
+            "relative_category_context_support": _ratio_bucket(ratio),
         }
 
+    num_candidates = len(candidates)
+    num_candidates_with_exact_support = sum(
+        1 for candidate in candidates
+        if item_bundle_counts.get(candidate["item_id"], 0) > 0
+    )
+    num_candidates_directly_cobundled = sum(
+        1 for candidate in candidates
+        if candidate_cooccurs_with_partial.get(candidate["label"], 0) > 0
+    )
+    num_candidates_sharing_partial_category = sum(
+        1 for candidate in candidates
+        if candidate_level_diagnostic.get(candidate["label"], {}).get("category_overlap_with_partial") == "yes"
+    )
+    candidate_categories = {
+        cate_by_item.get(candidate["item_id"], "")
+        for candidate in candidates
+        if cate_by_item.get(candidate["item_id"], "")
+    }
+    category_diversity = "low"
+    if len(candidate_categories) >= 5:
+        category_diversity = "high"
+    elif len(candidate_categories) >= 3:
+        category_diversity = "medium"
+
+    if num_candidates_directly_cobundled <= 0:
+        direct_feasibility = "none"
+    elif num_candidates_directly_cobundled == num_candidates:
+        direct_feasibility = "available"
+    elif num_candidates_directly_cobundled <= max(1, num_candidates // 3):
+        direct_feasibility = "limited"
+    else:
+        direct_feasibility = "mixed"
+
     return {
-        "purpose": (
-            "Lightweight train-safe reconnaissance for planning only. "
-            "Use it to calibrate retrieval paths; do not treat it as final fit evidence."
-        ),
+        "purpose": "retrieval planning only; not candidate scoring",
         "recon_legend": {
-            "train_bundle_count": "Number of train bundles containing this exact item.",
-            "category_bundle_count": "For a partial item, number of train bundles containing at least one item with this partial item's category.",
-            "direct_bundle_count_with_partial_set": "For a candidate, number of train bundles containing this candidate item and all exact partial items.",
-            "shares_partial_category": "Whether the candidate category matches any partial item category.",
-            "candidate_category": "Category id of the candidate item.",
-            "matching_partial_item_ids": "Partial item ids whose category matches this candidate category.",
-            "category_count_in_partial_context": "Number of train bundles containing the partial category context and this candidate category.",
-            "category_ratio_in_partial_context": "category_count_in_partial_context divided by partial_category_context_bundle_count.",
-            "exact_partial_set_bundle_count": "Number of train bundles containing all exact partial items.",
-            "partial_category_context_bundle_count": "Number of train bundles containing all partial item categories.",
-            "partial_category_bundle_counts": "Per partial category, number of train bundles containing that category.",
-            "bundle_rows_scanned": "Number of bi_train bundle rows scanned to compute this recon.",
+            "support_labels": "none, low, medium, high are bucketed diagnostics derived from train bundle/category counts.",
+            "partial_item_support": "Bucketed support for exact partial items in train bundles.",
+            "exact_partial_set_support": "Bucketed support for train bundles containing the full exact partial set.",
+            "partial_category_context_support": "Bucketed support for train bundles containing the partial item category context.",
+            "category_overlap_with_partial": "Whether a candidate category matches any partial item category.",
+            "relative_category_context_support": "Bucketed ratio of candidate-category rows inside the partial-category context.",
+            "direct_cobundle_feasibility": "Whether exact candidate-partial co-bundle lookup is feasible across candidates.",
+            "exact_item_support_coverage": "Bucketed fraction of candidates with exact train-bundle support.",
+            "category_diversity": "Bucketed diversity of candidate categories.",
+            "same_category_candidate_presence": "Whether any candidate shares a partial item category.",
         },
         "sources_read": [
             name for name, path in (
@@ -483,16 +551,31 @@ def build_analysis_recon(workspace, case_view, max_scan_rows=None):
             )
             if os.path.isfile(path)
         ],
-        "partial_items": partial_recon,
-        "candidates": candidate_recon,
-        "partial_set": {
-            "partial_item_count": len(partial_ids),
-            "partial_categories": sorted(partial_cates),
-            "exact_partial_set_bundle_count": exact_partial_set_bundle_count,
-            "partial_category_bundle_counts": partial_category_bundle_counts,
-            "partial_category_context_bundle_count": partial_category_context_bundle_rows,
-            "bundle_rows_scanned": bundle_rows_scanned,
-            "max_scan_rows": max_scan_rows,
+        "sample_level_diagnostic": {
+            "partial_item_support": _support_bucket(
+                max((item_bundle_counts.get(item_id, 0) for item_id in partial_ids), default=0)
+            ),
+            "exact_partial_set_support": _support_bucket(exact_partial_set_bundle_count),
+            "partial_category_context_support": _support_bucket(partial_category_context_bundle_rows),
+            "partial_category_specificity": (
+                "single_category"
+                if len(partial_cates) == 1
+                else "multi_category"
+                if len(partial_cates) > 1
+                else "unknown"
+            ),
+        },
+        "partial_item_diagnostic": partial_item_diagnostic,
+        "candidate_level_diagnostic": candidate_level_diagnostic,
+        "aggregate_candidate_diagnostic": {
+            "direct_cobundle_feasibility": direct_feasibility,
+            "exact_item_support_coverage": _coverage_bucket(
+                num_candidates_with_exact_support, num_candidates
+            ),
+            "category_diversity": category_diversity,
+            "same_category_candidate_presence": (
+                "present" if num_candidates_sharing_partial_category else "none"
+            ),
         },
     }
 
