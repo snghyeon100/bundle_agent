@@ -95,6 +95,30 @@ def _validate_observation_payload(payload, path):
     return issues
 
 
+def _validate_item_payload(payload, path):
+    issues = []
+    if not isinstance(payload, dict):
+        return [f"{path} must be an object."]
+    allowed = {"role", "item_id", "label", "evidence"}
+    extra = sorted(set(payload) - allowed)
+    if extra:
+        issues.append(f"{path} has unsupported fields: {', '.join(extra)}")
+    ev = payload.get("evidence")
+    if not isinstance(ev, list):
+        issues.append(f"{path}.evidence must be a list.")
+    else:
+        long_entries = [i for i, entry in enumerate(ev) if len(str(entry)) > 1000]
+        if long_entries:
+            issues.append(
+                f"{path}.evidence entries too long at indexes {long_entries[:5]}; "
+                "limit each evidence group to at most 5 item titles."
+            )
+    role = str(payload.get("role", "")).strip()
+    if role and role not in {"partial", "candidate"}:
+        issues.append(f"{path}.role must be partial or candidate when present.")
+    return issues
+
+
 def _signals_only(evidence):
     if isinstance(evidence, dict) and isinstance(evidence.get("signals"), list):
         return {"signals": evidence["signals"]}
@@ -128,7 +152,14 @@ def _validate_policy_trace(payload):
     return issues
 
 
-def validate_evidence(evidence, labels, allowed_source_names, max_chars=30000, require_relation_path=False):
+def validate_evidence(
+    evidence,
+    labels,
+    allowed_source_names,
+    max_chars=30000,
+    require_relation_path=False,
+    partial_item_ids=None,
+):
     """Validate the generated evidence JSON.
 
     Stage 1 keeps only retrieval evidence, without narrative value fields.
@@ -146,8 +177,11 @@ def validate_evidence(evidence, labels, allowed_source_names, max_chars=30000, r
         return issues
 
     required = set(labels)
-    saw_partial = False
-    saw_candidate = False
+    saw_sample_context = False
+    saw_item = False
+    partial_item_ids = partial_item_ids or []
+    required_item_keys = {f"candidate_{label}" for label in labels}
+    required_item_keys.update(f"partial_{int(item_id)}" for item_id in partial_item_ids)
 
     for idx, sig in enumerate(signals):
         pfx = f"signals[{idx}]"
@@ -159,24 +193,51 @@ def validate_evidence(evidence, labels, allowed_source_names, max_chars=30000, r
             "signal_scope",
             "observation",
             "candidate_observations",
+            "item_observations",
         }
         extra = sorted(set(sig) - allowed_fields)
         if extra:
             issues.append(f"{pfx} has unsupported fields: {', '.join(extra)}")
 
         scope = str(sig.get("signal_scope", "")).strip()
-        if scope not in {"partial_bundle", "candidate"}:
-            issues.append(f"{pfx}.signal_scope must be either partial_bundle or candidate.")
+        if scope not in {"sample_context", "item", "partial_bundle", "candidate"}:
+            issues.append(
+                f"{pfx}.signal_scope must be sample_context or item "
+                "(legacy partial_bundle/candidate also accepted)."
+            )
 
-        if scope == "partial_bundle":
-            saw_partial = True
-            if "candidate_observations" in sig:
-                issues.append(f"{pfx} with partial_bundle scope must not include candidate_observations.")
+        if scope in {"sample_context", "partial_bundle"}:
+            saw_sample_context = True
+            if "candidate_observations" in sig or "item_observations" in sig:
+                issues.append(f"{pfx} with {scope} scope must not include item/candidate observations.")
             issues.extend(_validate_observation_payload(sig.get("observation"), f"{pfx}.observation"))
             continue
 
+        if scope == "item":
+            saw_item = True
+            if "observation" in sig or "candidate_observations" in sig:
+                issues.append(f"{pfx} with item scope must not include observation or candidate_observations.")
+            obs = sig.get("item_observations")
+            if not isinstance(obs, dict):
+                issues.append(f"{pfx}.item_observations must be an object.")
+                continue
+            missing = sorted(required_item_keys - set(obs))
+            extra_keys = sorted(set(obs) - required_item_keys)
+            if missing:
+                issues.append(f"{pfx} missing item keys: {', '.join(missing)}")
+            if extra_keys:
+                issues.append(f"{pfx} unknown item keys: {', '.join(extra_keys)}")
+            for key in sorted(required_item_keys):
+                issues.extend(
+                    _validate_item_payload(
+                        obs.get(key),
+                        f"{pfx}.item_observations.{key}",
+                    )
+                )
+            continue
+
         if scope == "candidate":
-            saw_candidate = True
+            saw_item = True
             if "observation" in sig:
                 issues.append(f"{pfx} with candidate scope must not include observation.")
             obs = sig.get("candidate_observations")
@@ -198,10 +259,10 @@ def validate_evidence(evidence, labels, allowed_source_names, max_chars=30000, r
                     )
                 )
 
-    if not saw_partial:
-        issues.append("Stage 1 missing a partial_bundle scoped evidence signal.")
-    if not saw_candidate:
-        issues.append("Stage 1 missing a candidate scoped evidence signal.")
+    if not saw_sample_context:
+        issues.append("Stage 1 missing a sample_context scoped evidence signal.")
+    if not saw_item:
+        issues.append("Stage 1 missing an item scoped evidence signal.")
 
     size = len(compact_json(evidence))
     if size > int(max_chars):
@@ -223,7 +284,7 @@ def merge_evidence(prev, curr):
     return {"signals": list(merged.values())}
 
 
-def validate_stage2_summary_evidence(evidence, labels):
+def validate_stage2_summary_evidence(evidence, labels, partial_item_ids=None):
     issues = []
     if not isinstance(evidence, dict):
         return ["Stage 2 evidence must be a JSON object."]
@@ -231,51 +292,53 @@ def validate_stage2_summary_evidence(evidence, labels):
     if not isinstance(signals, list) or not signals:
         return ["Stage 2 JSON must contain a non-empty signals list."]
 
-    partial = None
-    candidate = None
+    sample_context = None
+    item_signal = None
     for signal in signals:
         if not isinstance(signal, dict):
             issues.append("Every Stage 2 signal must be an object.")
             continue
         name = str(signal.get("signal_name", "")).strip()
-        if name == "partial_bundle_item_summary":
-            partial = signal
-        elif name == "candidate_item_summaries":
-            candidate = signal
+        if name == "sample_context_summary":
+            sample_context = signal
+        elif name == "item_summaries":
+            item_signal = signal
         unsupported = sorted(
             set(signal)
-            - {"signal_name", "signal_scope", "description", "summary", "candidate_summaries"}
+            - {"signal_name", "signal_scope", "description", "summary", "item_summaries", "candidate_summaries"}
         )
         if unsupported:
             issues.append(f"{name or 'unnamed Stage 2 signal'} has unsupported fields: {', '.join(unsupported)}")
 
-    if not partial:
-        issues.append("Stage 2 missing partial_bundle_item_summary signal.")
+    if not sample_context:
+        issues.append("Stage 2 missing sample_context_summary signal.")
     else:
-        if str(partial.get("signal_scope", "")).strip() != "partial_bundle":
-            issues.append("partial_bundle_item_summary must use signal_scope partial_bundle.")
-        if not str(partial.get("summary", "")).strip():
-            issues.append("partial_bundle_item_summary.summary must be a non-empty string.")
+        if str(sample_context.get("signal_scope", "")).strip() != "sample_context":
+            issues.append("sample_context_summary must use signal_scope sample_context.")
+        if not str(sample_context.get("summary", "")).strip():
+            issues.append("sample_context_summary.summary must be a non-empty string.")
 
-    if not candidate:
-        issues.append("Stage 2 missing candidate_item_summaries signal.")
+    if not item_signal:
+        issues.append("Stage 2 missing item_summaries signal.")
     else:
-        if str(candidate.get("signal_scope", "")).strip() != "candidate":
-            issues.append("candidate_item_summaries must use signal_scope candidate.")
-        summaries = candidate.get("candidate_summaries")
+        if str(item_signal.get("signal_scope", "")).strip() != "item":
+            issues.append("item_summaries must use signal_scope item.")
+        summaries = item_signal.get("item_summaries")
         if not isinstance(summaries, dict):
-            issues.append("candidate_item_summaries.candidate_summaries must be an object.")
+            issues.append("item_summaries.item_summaries must be an object.")
         else:
-            required = set(labels)
+            partial_item_ids = partial_item_ids or []
+            required = {f"candidate_{label}" for label in labels}
+            required.update(f"partial_{int(item_id)}" for item_id in partial_item_ids)
             missing = sorted(required - set(summaries))
             extra = sorted(set(summaries) - required)
             if missing:
-                issues.append("candidate_summaries missing candidates: " + ", ".join(missing))
+                issues.append("item_summaries missing item keys: " + ", ".join(missing))
             if extra:
-                issues.append("candidate_summaries unknown candidates: " + ", ".join(extra))
-            for label in labels:
-                if not str(summaries.get(label, "")).strip():
-                    issues.append(f"candidate_summaries.{label} must be a non-empty string.")
+                issues.append("item_summaries unknown item keys: " + ", ".join(extra))
+            for key in sorted(required):
+                if not str(summaries.get(key, "")).strip():
+                    issues.append(f"item_summaries.{key} must be a non-empty string.")
     return issues
 
 
@@ -327,7 +390,14 @@ async def _generate_execute_repair(
     def _issues(r):
         if execution_needs_repair(r):
             return []
-        return validate_evidence(r.get("evidence_json"), labels, src_names, max_chars, require_rpath)
+        return validate_evidence(
+            r.get("evidence_json"),
+            labels,
+            src_names,
+            max_chars,
+            require_rpath,
+            partial_item_ids=case_view.get("partial_item_ids", []),
+        )
 
     issues = _issues(result)
     repairs = []
@@ -543,7 +613,13 @@ async def run_sem_agent(
         stage2_evidence = {"signals": []}
     else:
         stage2_evidence = parsed_stage2
-        stage2_issues.extend(validate_stage2_summary_evidence(stage2_evidence, labels))
+        stage2_issues.extend(
+            validate_stage2_summary_evidence(
+                stage2_evidence,
+                labels,
+                partial_item_ids=case_view.get("partial_item_ids", []),
+            )
+        )
     
     s2_result = {
         "raw_response": s2_raw,

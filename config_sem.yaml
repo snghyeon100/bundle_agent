@@ -26,7 +26,7 @@ openai_reasoning_effort: "low"    # minimal | low | medium | high
 # Leave a stage-specific key empty to fall back to the legacy/shared key below.
 sem_analysis_provider: openai
 sem_analysis_model: gpt-5.1
-sem_analysis_api_key_env: "OPENAI_API_KEY"  # Stage 0: Problem Analysis
+sem_analysis_api_key_env: "DMLAB_KEY"  # Stage 0: Problem Analysis
 
 sem_evidence_provider: openai
 sem_evidence_model: gpt-5.1

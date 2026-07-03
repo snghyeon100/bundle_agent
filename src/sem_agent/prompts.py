@@ -118,7 +118,9 @@ def problem_analysis_prompt(case_view, source_manifest, semantic_case=None, data
         "A partial bundle and multiple candidate items are given. The final task of the full "
         "system is to choose which candidate item should be added to the partial bundle.\n\n"
         "Your role is not to answer the task. Your role is to analyze this specific problem "
-        "instance so that a later evidence-retrieval agent can retrieve sample-adaptive evidence.\n\n"
+        "instance and specify what source-grounded evidence should be retrieved, from which "
+        "sources, and through which retrieval patterns, so that a later code-generation agent "
+        "can synthesize the evidence retrieval program.\n\n"
         "Analyze what needs to be understood about this instance in order to retrieve useful, "
         "source-grounded evidence for the partial item(s) and each candidate. Decide for yourself "
         "what aspects of the problem are important. The analysis should be specific to this "
@@ -149,7 +151,7 @@ def problem_analysis_prompt(case_view, source_manifest, semantic_case=None, data
         "    ]\n"
         "  },\n"
         '  "strategy": {\n'
-        '    "global": [\n'
+        '    "sample_context": [\n'
         "      {\n"
         '        "name": "short_unique_strategy_name",\n'
         '        "intent": "Why this evidence is needed for this sample, without judging fit.",\n'
@@ -167,14 +169,34 @@ def problem_analysis_prompt(case_view, source_manifest, semantic_case=None, data
         '        "fallback": "Fallback retrieval to use if the primary view is sparse or unavailable."\n'
         "      }\n"
         "    ],\n"
-        '    "candidate": {\n'
-        '      "A": [\n'
+        '    "item": {\n'
+        '      "partial_6606": [\n'
+        "        {\n"
+        '          "name": "short_unique_partial_item_strategy_name",\n'
+        '          "intent": "Why this partial item needs item-level evidence, without judging fit.",\n'
+        '          "paths": ["source_name.ext"],\n'
+        '          "operator_hint": "Code-friendly retrieval pattern.",\n'
+        '          "anchors": {\n'
+        '            "role": "partial",\n'
+        '            "item_id": "item id",\n'
+        '            "item_category": "category id or role",\n'
+        '            "keywords": ["partial-item title/style/season/motif cues"]\n'
+        "          },\n"
+        '          "operation": "Partial-item executable retrieval instruction, not a final-answer hint.",\n'
+        '          "views": ["Separate evidence views to output for this partial item."],\n'
+        '          "filters_or_grouping": ["Partial-item filters, grouping keys, caps, or diversity rules."],\n'
+        '          "fallback": "Partial-item fallback retrieval if the primary view is sparse."\n'
+        "        }\n"
+        "      ],\n"
+        '      "candidate_A": [\n'
         "        {\n"
         '          "name": "short_unique_candidate_strategy_name",\n'
         '          "intent": "Why this candidate needs this evidence, without judging fit.",\n'
         '          "paths": ["source_name.ext"],\n'
         '          "operator_hint": "Code-friendly retrieval pattern.",\n'
         '          "anchors": {\n'
+        '            "role": "candidate",\n'
+        '            "label": "A",\n'
         '            "candidate_item": "item id",\n'
         '            "candidate_category": "category id or role",\n'
         '            "partial_items": ["item ids"],\n'
@@ -190,23 +212,28 @@ def problem_analysis_prompt(case_view, source_manifest, semantic_case=None, data
         "    }\n"
         "  }\n"
         "}\n\n"
-        "The `strategy.global` list should contain code-friendly retrieval specs useful across "
-        "the sample. Each spec must name source paths, `operator_hint`, concrete `anchors`, "
+        "The `strategy.sample_context` list should contain code-friendly retrieval specs for "
+        "shared problem-level context that should be retrieved once for the whole sample. Each "
+        "spec must name source paths, `operator_hint`, concrete `anchors`, "
         "`operation`, requested `views`, filters/grouping, and fallback. `operator_hint` is a "
         "hint for the later code generator, not a closed vocabulary; choose the simplest reusable "
         "retrieval pattern that fits the evidence need. Avoid generic operations like plain nearest "
         "neighbors unless you add sample-specific anchors, filters, clusters, or aggregation. "
-        "The `strategy.candidate` object should only mention candidates that need special retrieval "
-        "because of role, category overlap, sparsity, season/style cues, motif cues, or other "
-        "sample-specific issues, and each entry must use the same code-friendly spec format. "
+        "Separate strategies into `sample_context` and `item`: use `sample_context` for shared "
+        "problem context, and use `item` for evidence needs tied to one partial item or one "
+        "candidate item. Use item keys like `partial_6606` and `candidate_A`. "
+        "`strategy.item` should include partial-item strategies when the partial item itself needs "
+        "item-level evidence, and candidate-item strategies for candidates that need special "
+        "retrieval because of role, category overlap, sparsity, season/style cues, motif cues, "
+        "or other sample-specific issues. Each entry must use the same code-friendly spec format. "
         "Use multiple `views` when one strategy needs multiple retrieval substeps; the later "
         "evidence stage should be able to output one evidence string per view.\n\n"
         f"{task_semantics(case_view['dataset'])}\n\n"
         "Enriched case context (IDs/text/category plus deterministic planning recon):\n"
         f"{_dump(_enriched_case_context(case_view, semantic_case, data_recon))}\n\n"
         "Recon fields are planning inputs, not final compatibility evidence. Use item-level "
-        "`recon` fields and `candidate_level_diagnostic` patterns for candidate-specific strategy; "
-        "use `sample_level_diagnostic` and `aggregate_candidate_diagnostic` for global strategy. "
+        "`recon` fields and `candidate_level_diagnostic` patterns for item-level strategy; "
+        "use `sample_level_diagnostic` and `aggregate_candidate_diagnostic` for sample-context strategy. "
         "Use `recon_legend` to interpret recon field names.\n\n"
         f"Source Capability Manifest:\n{_dump(source_manifest)}"
     )
@@ -231,6 +258,9 @@ def stage1_ecosystem_prompt(
     only when tied to a named retrieval view, not as final scores.
     """
     labels = ", ".join(candidate_labels(case_view))
+    partial_item_keys = [f"partial_{int(item_id)}" for item_id in case_view.get("partial_item_ids", [])]
+    candidate_item_keys = [f"candidate_{label}" for label in candidate_labels(case_view)]
+    item_keys = ", ".join(partial_item_keys + candidate_item_keys)
 
     semantic_goals = (
         "STAGE 1 TASK - Analysis-Conditioned Evidence Code Generation\n"
@@ -240,8 +270,8 @@ def stage1_ecosystem_prompt(
         "source-grounded evidence for the partial item(s) and every candidate. Do not choose, "
         "rank, recommend, or judge candidate fit.\n\n"
         "Treat the Problem Analysis `strategy` section as the retrieval program spec for this "
-        "sample. For every named global or candidate strategy, copy its exact name into "
-        "`GLOBAL_PLAN` or `CANDIDATE_PLAN` and preserve its `operator_hint`, anchors, operation, "
+        "sample. For every named sample-context or item strategy, copy its exact name into "
+        "`SAMPLE_CONTEXT_PLAN` or `ITEM_PLAN` and preserve its `operator_hint`, anchors, operation, "
         "views, filters/grouping, and fallback. Either implement each requested view with "
         "available workspace sources or record the exact strategy/view name and concrete "
         "data/source reason in `skipped_analysis_needs`.\n\n"
@@ -249,9 +279,9 @@ def stage1_ecosystem_prompt(
         "metadata, or co-bundle recipe unless the strategy asks for that view. Use "
         "`operator_hint` as the main dispatch hint in `run_strategy`; if an older analysis lacks "
         "`operator_hint`, infer the closest retrieval pattern from `operation`, `paths`, and "
-        "anchors. Keep candidate evidence comparable: apply relevant global strategies across "
-        "candidates, and add candidate-specific views only where the Problem Analysis asks for "
-        "them.\n\n"
+        "anchors. Keep item evidence comparable: apply shared `sample_context` strategies once "
+        "for the whole problem, and add item-specific views only where the Problem Analysis asks "
+        "for them.\n\n"
         "Build `policy_trace` from the exact Problem Analysis strategy names before retrieval. "
         "For each name, record implemented retrieval paths, skipped subviews, and fallbacks used. "
         "Use grouped examples, category/role concentration, source sparsity, source agreement or "
@@ -276,7 +306,8 @@ def stage1_ecosystem_prompt(
         "predictions, fit judgments, or final recommendations. Do not output ungrounded raw "
         "scores. Counts, ratios, or similarities are allowed only when an analysis instruction "
         "asks for them and the evidence string names the retrieval path and what was counted or "
-        "compared. Stage 1 output should keep only `signal_scope` and evidence arrays.\n\n"
+        "compared. Stage 1 output should keep only `signal_scope`, `observation`, "
+        "`item_observations`, item identity fields, and evidence arrays.\n\n"
 
         "STAGE 1 OUTPUT STRUCTURE\n"
         "Produce JSON with `policy_trace` for audit/debug and exactly these two signal shapes. "
@@ -292,19 +323,29 @@ def stage1_ecosystem_prompt(
         "  },\n"
         '  "signals": [\n'
         "    {\n"
-        '      "signal_scope": "partial_bundle",\n'
+        '      "signal_scope": "sample_context",\n'
         '      "observation": {\n'
         '        "evidence": [\n'
-        '          "evidence string following EVIDENCE STRING RULES"\n'
+        '          "shared sample-level evidence string following EVIDENCE STRING RULES"\n'
         "        ]\n"
         "      }\n"
         "    },\n"
         "    {\n"
-        '      "signal_scope": "candidate",\n'
-        '      "candidate_observations": {\n'
-        '        "A": {\n'
+        '      "signal_scope": "item",\n'
+        '      "item_observations": {\n'
+        '        "partial_6606": {\n'
+        '          "role": "partial",\n'
+        '          "item_id": 6606,\n'
         '          "evidence": [\n'
-        '            "evidence string following EVIDENCE STRING RULES"\n'
+        '            "partial item evidence string following EVIDENCE STRING RULES"\n'
+        "          ]\n"
+        "        },\n"
+        '        "candidate_A": {\n'
+        '          "role": "candidate",\n'
+        '          "label": "A",\n'
+        '          "item_id": 43712,\n'
+        '          "evidence": [\n'
+        '            "candidate item evidence string following EVIDENCE STRING RULES"\n'
         "          ]\n"
         "        }\n"
         "      }\n"
@@ -318,7 +359,7 @@ def stage1_ecosystem_prompt(
         "- If the Problem Analysis provides strategy instructions, follow them as the "
         "sample-specific retrieval contract.\n"
         "- Preserve each strategy dict from the Problem Analysis as plan config when possible; "
-        "`GLOBAL_PLAN` and `CANDIDATE_PLAN` should expose `name`, `operator_hint`, `anchors`, "
+        "`SAMPLE_CONTEXT_PLAN` and `ITEM_PLAN` should expose `name`, `operator_hint`, `anchors`, "
         "`views`, and fallback details to `run_strategy`.\n"
         "- Treat the listed sources as a relation graph, not as isolated files. You can compose relations when useful to retrieve supporting items.\n"
         "- CPU-only: load every .pt file with torch.load(..., map_location=\"cpu\"). "
@@ -333,20 +374,20 @@ def stage1_ecosystem_prompt(
         "def main():\n"
         "    sources = load_sources()\n"
         "    indexes = build_indexes(sources)\n"
-        "    policy_trace = init_policy_trace(GLOBAL_PLAN, CANDIDATE_PLAN)\n"
+        "    policy_trace = init_policy_trace(SAMPLE_CONTEXT_PLAN, ITEM_PLAN)\n"
         "\n"
-        "    partial_evidence = []\n"
-        "    for cfg in GLOBAL_PLAN:\n"
-        "        partial_evidence.extend(run_strategy(cfg, indexes, scope='partial_bundle'))\n"
+        "    sample_context_evidence = []\n"
+        "    for cfg in SAMPLE_CONTEXT_PLAN:\n"
+        "        sample_context_evidence.extend(run_strategy(cfg, indexes, scope='sample_context'))\n"
         "\n"
-        "    candidate_evidence = {label: [] for label in REQUIRED_LABELS}\n"
-        "    for label in REQUIRED_LABELS:\n"
-        "        for cfg in CANDIDATE_PLAN.get(label, []):\n"
-        "            candidate_evidence[label].extend(run_strategy(cfg, indexes, scope='candidate', label=label))\n"
-        "        if not candidate_evidence[label]:\n"
-        "            candidate_evidence[label].append(make_sparse_note(label))\n"
+        "    item_evidence = {key: [] for key in REQUIRED_ITEM_KEYS}\n"
+        "    for key in REQUIRED_ITEM_KEYS:\n"
+        "        for cfg in ITEM_PLAN.get(key, []):\n"
+        "            item_evidence[key].extend(run_strategy(cfg, indexes, scope='item', item_key=key))\n"
+        "        if not item_evidence[key]:\n"
+        "            item_evidence[key].append(make_sparse_note(key))\n"
         "\n"
-        "    output_obj = build_output(policy_trace, partial_evidence, candidate_evidence)\n"
+        "    output_obj = build_output(policy_trace, sample_context_evidence, item_evidence)\n"
         "    write_json(output_obj, OUTPUT_PATH)\n"
         "\n"
         "if __name__ == '__main__':\n"
@@ -367,6 +408,8 @@ def stage1_ecosystem_prompt(
         "The script runs with the allowed workspace as its current directory.\n"
         f"The script must write UTF-8 JSON to exactly this path: {output_file}\n\n"
         f"{task_semantics(case_view['dataset'])}\n\n"
+        f"Required item keys for Stage 1 item evidence: {item_keys}\n"
+        f"Required candidate labels: {labels}\n\n"
         f"Problem Analysis Retrieval Contract (not evidence; do not copy it as evidence):\n"
         f"{problem_analysis or '(none provided)'}\n\n"
         f"{semantic_goals}\n"
@@ -399,26 +442,45 @@ def stage2_gap_prompt(
     """
     labels = ", ".join(candidate_labels(case_view))
     # Combine Stage 1 evidence into unified case
-    partial_evidence = []
+    sample_context_evidence = []
+    item_evidence_by_key = {}
     for sig in stage1_evidence.get("signals", []) if isinstance(stage1_evidence, dict) else []:
-        if str(sig.get("signal_scope", "")).strip() == "partial_bundle":
+        scope = str(sig.get("signal_scope", "")).strip()
+        if scope == "sample_context":
             obs = sig.get("observation")
             if isinstance(obs, dict):
-                partial_evidence.append({
+                sample_context_evidence.append({
                     "evidence": obs.get("evidence")
                 })
-
-    cand_evidence_by_label = {}
-    for sig in stage1_evidence.get("signals", []) if isinstance(stage1_evidence, dict) else []:
-        if str(sig.get("signal_scope", "")).strip() == "candidate":
+        elif scope == "item":
+            item_obs = sig.get("item_observations")
+            if isinstance(item_obs, dict):
+                for key, obs in item_obs.items():
+                    if not isinstance(obs, dict):
+                        continue
+                    item_evidence_by_key.setdefault(str(key), []).append({
+                        "role": obs.get("role"),
+                        "item_id": obs.get("item_id"),
+                        "label": obs.get("label"),
+                        "evidence": obs.get("evidence"),
+                    })
+        elif scope == "partial_bundle":
+            # Backward compatibility for older Stage 1 outputs.
+            obs = sig.get("observation")
+            if isinstance(obs, dict):
+                sample_context_evidence.append({
+                    "evidence": obs.get("evidence")
+                })
+        elif scope == "candidate":
+            # Backward compatibility for older Stage 1 outputs.
             c_obs = sig.get("candidate_observations")
             if isinstance(c_obs, dict):
                 for lbl, obs in c_obs.items():
                     if not isinstance(obs, dict):
                         continue
-                    if lbl not in cand_evidence_by_label:
-                        cand_evidence_by_label[lbl] = []
-                    cand_evidence_by_label[lbl].append({
+                    item_evidence_by_key.setdefault(f"candidate_{lbl}", []).append({
+                        "role": "candidate",
+                        "label": lbl,
                         "evidence": obs.get("evidence")
                     })
 
@@ -432,30 +494,44 @@ def stage2_gap_prompt(
 
     if semantic_case:
         for item in semantic_case.get("partial_items", []):
+            item_key = f"partial_{int(item.get('item_id'))}"
             unified_case["partial_items"].append({
+                "item_key": item_key,
                 "item_id": item.get("item_id"),
                 "text": item.get("text", ""),
-                "stage1_evidence": partial_evidence,
+                "stage1_sample_context": sample_context_evidence,
+                "stage1_item_evidence": item_evidence_by_key.get(item_key, []),
             })
         for cand in semantic_case.get("candidates", []):
             lbl = str(cand.get("label", ""))
+            item_key = f"candidate_{lbl}"
             unified_case["candidates"].append({
+                "item_key": item_key,
                 "label": lbl,
                 "item_id": cand.get("item_id"),
                 "text": cand.get("text", ""),
-                "stage1_evidence": cand_evidence_by_label.get(lbl, [])
+                "stage1_sample_context": sample_context_evidence,
+                "stage1_item_evidence": item_evidence_by_key.get(item_key, [])
             })
     else:
         unified_case["partial_items"] = [
-            {"item_id": item_id, "stage1_evidence": partial_evidence}
+            {
+                "item_key": f"partial_{int(item_id)}",
+                "item_id": item_id,
+                "stage1_sample_context": sample_context_evidence,
+                "stage1_item_evidence": item_evidence_by_key.get(f"partial_{int(item_id)}", []),
+            }
             for item_id in case_view.get("partial_item_ids", [])
         ]
         for cand in case_view.get("candidates", []):
             lbl = str(cand.get("label", ""))
+            item_key = f"candidate_{lbl}"
             unified_case["candidates"].append({
+                "item_key": item_key,
                 "label": lbl,
                 "item_id": cand.get("item_id"),
-                "stage1_evidence": cand_evidence_by_label.get(lbl, [])
+                "stage1_sample_context": sample_context_evidence,
+                "stage1_item_evidence": item_evidence_by_key.get(item_key, [])
             })
 
     legacy_stage2_fit_goals = (
@@ -520,55 +596,56 @@ def stage2_gap_prompt(
     )
 
     semantic_goals = (
-        "Stage 1 has already expanded every partial item and candidate item into "
-        "supporting items retrieved from the source relation graph. In the Unified Case below, "
-        "each item has its text placed next to its Stage 1 evidence. Your task is to build "
-        "bundle-completion-aware item profiles, not fit judgments or candidate selections.\n\n"
-        "GOAL 1 - Partial Bundle Item Profile (required)\n"
-        "  Profile the partial bundle item(s) using the item text and attached Stage 1 evidence. "
-        "Describe the observed item role(s), visible/style attributes, occasion or season cues, "
-        "bundle-relevant category/role context, and uncertainty. Do not name a missing item type "
-        "as the answer and do not recommend any candidate.\n\n"
-        "GOAL 2 - Candidate Item Profiles (required)\n"
-        "  For each candidate, profile only that candidate's item text and attached Stage 1 evidence. "
-        "Describe the item's likely outfit role, style attributes, occasion or season cues, "
-        "bundle-relevant category/role context, and mixed or sparse evidence. "
+        "Stage 1 has retrieved shared sample-context evidence and item-level evidence for "
+        "partial and candidate items. In the Unified Case below, each item has its text next "
+        "to both the shared Stage 1 sample context and its own item evidence. Your task is to "
+        "build bundle-completion-aware summaries, not fit judgments or candidate selections.\n\n"
+        "GOAL 1 - Sample Context Summary (required)\n"
+        "  Summarize the shared problem-level context implied by Stage 1 sample-context evidence: "
+        "partial-bundle category/role context, candidate-set contrasts, source sparsity, common "
+        "co-occurrence patterns, and uncertainty. Do not recommend any candidate.\n\n"
+        "GOAL 2 - Item Summaries (required)\n"
+        "  For each partial item and each candidate item, profile only that item's text and "
+        "attached Stage 1 item evidence. Describe the item's likely outfit role, style attributes, "
+        "occasion or season cues, bundle-relevant category/role context, and mixed or sparse evidence. "
         "Do not compare candidates to each other. Do not describe whether a candidate fits the partial bundle.\n\n"
         "STRICT NEUTRALITY RULES\n"
         "- Do not rank candidates or choose a winner.\n"
         "- Do not use phrases such as strong fit, weak fit, fits well, best, worse, should be selected, "
         "more aligned, less aligned, likely correct, or final answer.\n"
-        "- Do not output `value`, `evidence`, `observation`, or `candidate_observations` in Stage 2. "
-        "Output one summary string for the partial bundle and one summary string per candidate.\n\n"
+        "- Do not output `value`, `evidence`, `observation`, `item_observations`, or "
+        "`candidate_observations` in Stage 2. Output one sample-context summary and one "
+        "summary string per item key.\n\n"
         "STAGE 2 OUTPUT STRUCTURE\n"
         "Produce JSON with exactly the following two signal shapes:\n"
         "```json\n"
         "{\n"
         '  "signals": [\n'
         "    {\n"
-        '      "signal_name": "partial_bundle_item_summary",\n'
-        '      "signal_scope": "partial_bundle",\n'
-        '      "description": "bundle-completion-aware neutral item profile of the partial bundle and its Stage 1 evidence",\n'
-        '      "summary": "partial bundle item profile using item text and Stage 1 evidence"\n'
+        '      "signal_name": "sample_context_summary",\n'
+        '      "signal_scope": "sample_context",\n'
+        '      "description": "shared problem-level context summarized from Stage 1 sample-context evidence",\n'
+        '      "summary": "sample-context summary using shared Stage 1 evidence"\n'
         "    },\n"
         "    {\n"
-        '      "signal_name": "candidate_item_summaries",\n'
-        '      "signal_scope": "candidate",\n'
-        '      "description": "bundle-completion-aware neutral item profiles for each candidate and its Stage 1 evidence",\n'
-        '      "candidate_summaries": {\n'
-        '        "A": "candidate A item profile using item text and Stage 1 evidence",\n'
-        '        "B": "candidate B item profile using item text and Stage 1 evidence"\n'
+        '      "signal_name": "item_summaries",\n'
+        '      "signal_scope": "item",\n'
+        '      "description": "bundle-completion-aware neutral item profiles for partial and candidate items",\n'
+        '      "item_summaries": {\n'
+        '        "partial_6606": "partial item profile using item text and Stage 1 item evidence",\n'
+        '        "candidate_A": "candidate A item profile using item text and Stage 1 item evidence"\n'
         "      }\n"
         "    }\n"
         "  ]\n"
         "}\n"
         "```\n"
-        f"Include every candidate label in `candidate_summaries`: {labels}.\n"
+        "Include every partial item key and every candidate item key in `item_summaries`.\n"
     )
 
     return (
         "You are the Stage 2 Bundle-Completion-Aware Item Profiler in a bundle-completion system.\n"
-        "Your task is to compress item text and Stage 1 evidence into neutral item profiles.\n\n"
+        "Your task is to compress Stage 1 sample-context evidence and item-level evidence "
+        "into neutral sample and item summaries.\n\n"
         f"{task_semantics(case_view['dataset'])}\n\n"
         f"{semantic_goals}\n"
         f"Unified Case (each item has text next to its Stage 1 evidence):\n{_dump(unified_case)}\n"
@@ -589,6 +666,9 @@ def repair_prompt(
     problem_analysis=None,
 ):
     labels = ", ".join(candidate_labels(case_view))
+    partial_item_keys = [f"partial_{int(item_id)}" for item_id in case_view.get("partial_item_ids", [])]
+    candidate_item_keys = [f"candidate_{label}" for label in candidate_labels(case_view)]
+    item_keys = ", ".join(partial_item_keys + candidate_item_keys)
     relation_path_rule = ""
     if require_relation_path:
         relation_path_rule = (
@@ -603,21 +683,23 @@ def repair_prompt(
         "the previous code as authoritative if it omitted or weakened analysis instructions.\n"
         "If the Problem Analysis contains code-friendly strategy specs with fields such as "
         "`operator_hint`, `anchors`, `views`, `filters_or_grouping`, and `fallback`, preserve "
-        "those fields in `GLOBAL_PLAN` or `CANDIDATE_PLAN` and repair `run_strategy` to dispatch "
+        "those fields in `SAMPLE_CONTEXT_PLAN` or `ITEM_PLAN` and repair `run_strategy` to dispatch "
         "from them. If a requested view is infeasible, skip that exact strategy/view with a "
         "concrete data/source reason instead of dropping the whole strategy.\n"
         "When repairing long or truncated code, prefer compact helper functions and config-driven "
         "loops over repeated per-candidate blocks. Do not repair by continuing separate long "
-        "`try` blocks for candidates A-J; use a `CANDIDATE_PLAN` loop with shared helpers. "
+        "`try` blocks for candidates A-J; use an `ITEM_PLAN` loop with shared helpers. "
         "Always finish by assembling the final JSON object and writing it to the required "
         "output path.\n"
         "CPU-only: torch.load(..., map_location=\"cpu\").\n\n"
         f"Script must write UTF-8 JSON to exactly: {output_file}\n"
-        f"Required candidate labels for every candidate-scoped signal: {labels}\n\n"
-        "CRITICAL: `signal_scope` must be either `partial_bundle` or `candidate`. "
-        "For `partial_bundle`, use one shared `observation` containing only `evidence`. "
-        "For `candidate`, use `candidate_observations` with every required candidate label, "
-        "and each label object must contain only `evidence`. Do not output `value`, "
+        f"Required item keys for item-scoped evidence: {item_keys}\n"
+        f"Required candidate labels: {labels}\n\n"
+        "CRITICAL: `signal_scope` must be either `sample_context` or `item`. "
+        "For `sample_context`, use one shared `observation` containing only `evidence`. "
+        "For `item`, use `item_observations` with every required item key. "
+        "Each item object must contain `evidence` and may include only item identity fields "
+        "such as `role`, `item_id`, and `label`. Do not output `value`, "
         "`description`, `sources`, `relation_path`, rankings, or explanations. Do not output "
         "ungrounded raw scores. Counts, ratios, or similarities are allowed only when tied to "
         "a named retrieval path requested by the analysis. Evidence "
@@ -629,8 +711,8 @@ def repair_prompt(
         f"include up to 5 representative titles and append a count such as "
         f"`(+1432 more items not shown)`.{relation_path_rule}\n\n"
         "Preserve this exact schema. Include `policy_trace` for audit/debug only. "
-        "Include `observation` only for partial_bundle signals, and include "
-        "`candidate_observations` only for candidate signals:\n"
+        "Include `observation` only for sample_context signals, and include "
+        "`item_observations` only for item signals:\n"
         "{\n"
         '  "policy_trace": {\n'
         '    "analysis_driven_needs": ["exact strategy instruction name from the Problem Analysis"],\n'
@@ -641,10 +723,11 @@ def repair_prompt(
         "  },\n"
         '  "signals": [\n'
         "    {\n"
-        '      "signal_scope": "partial_bundle | candidate",\n'
+        '      "signal_scope": "sample_context | item",\n'
         '      "observation": {"evidence": ["..."]},\n'
-        '      "candidate_observations": {\n'
-        '        "A": {"evidence": ["..."]}\n'
+        '      "item_observations": {\n'
+        '        "partial_6606": {"role": "partial", "item_id": 6606, "evidence": ["..."]},\n'
+        '        "candidate_A": {"role": "candidate", "label": "A", "item_id": 43712, "evidence": ["..."]}\n'
         "      }\n"
         "    }\n"
         "  ]\n"
@@ -681,13 +764,26 @@ def _partial_evidence_lines(evidence):
     for signal in signals:
         if not isinstance(signal, dict):
             continue
-        if str(signal.get("signal_scope", "")).strip() != "partial_bundle":
-            continue
-        summary = _summary_text(signal.get("summary"))
-        if not summary and isinstance(signal.get("observation"), dict):
-            summary = _summary_text(signal["observation"].get("value"))
-        if summary:
-            lines.append(f" - {summary}")
+        scope = str(signal.get("signal_scope", "")).strip()
+        name = str(signal.get("signal_name", "")).strip()
+        if scope == "sample_context" or name == "sample_context_summary":
+            summary = _summary_text(signal.get("summary"))
+            if summary:
+                lines.append(f" - Sample context: {summary}")
+        elif scope == "item":
+            summaries = signal.get("item_summaries", {})
+            if isinstance(summaries, dict):
+                for key, summary in summaries.items():
+                    if str(key).startswith("partial_"):
+                        text = _summary_text(summary)
+                        if text:
+                            lines.append(f" - {key}: {text}")
+        elif scope == "partial_bundle":
+            summary = _summary_text(signal.get("summary"))
+            if not summary and isinstance(signal.get("observation"), dict):
+                summary = _summary_text(signal["observation"].get("value"))
+            if summary:
+                lines.append(f" - {summary}")
     return lines
 
 
@@ -698,7 +794,14 @@ def _candidate_evidence_lines(evidence, label):
         if not isinstance(signal, dict):
             continue
         scope = str(signal.get("signal_scope", "candidate")).strip()
-        if scope == "partial_bundle":
+        if scope in {"partial_bundle", "sample_context"}:
+            continue
+        if scope == "item":
+            summaries = signal.get("item_summaries", {})
+            summary = summaries.get(f"candidate_{label}") if isinstance(summaries, dict) else ""
+            summary = _summary_text(summary)
+            if summary:
+                lines.append(f"   Stage 2 summary: {summary}")
             continue
         summaries = signal.get("candidate_summaries", {})
         summary = summaries.get(label) if isinstance(summaries, dict) else ""
