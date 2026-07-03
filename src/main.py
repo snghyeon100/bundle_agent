@@ -1,8 +1,8 @@
-"""main_sem.py — Entry point for the sem_agent pipeline.
+"""main.py — Entry point for the code-generation bundle-completion pipeline.
 
 Usage:
-    python main_sem.py --config config_sem.yaml
-    python main_sem.py --config config_sem.yaml --resume results/.../partial.csv
+    python src/main.py --config config_sem.yaml
+    python src/main.py --config config_sem.yaml --resume results/.../partial.csv
 """
 
 import argparse
@@ -18,8 +18,8 @@ from dotenv import load_dotenv
 from google import genai
 
 from dataset import BundleZeroShotDataset, set_seed
-from sem_agent import run_sem_agent
-from sem_agent.common import compact_json
+from code import run_code_agent
+from code.common import compact_json
 
 
 load_dotenv(
@@ -27,7 +27,7 @@ load_dotenv(
     encoding="utf-8-sig",
 )
 
-METHOD_NAME = "sem_agent"
+METHOD_NAME = "code"
 
 
 # ---------------------------------------------------------------------------
@@ -60,21 +60,33 @@ def create_llm_client(provider, api_key):
 
 
 STAGE_CONFIG = {
-    "analysis": {
-        "provider_keys": ["sem_analysis_provider"],
-        "model_keys": ["sem_analysis_model"],
-    },
-    "stage1": {
-        "provider_keys": ["sem_evidence_provider", "sem_stage1_provider"],
-        "model_keys": ["sem_evidence_model", "sem_stage1_model"],
-    },
-    "stage2": {
-        "provider_keys": ["sem_summary_provider", "sem_stage2_provider"],
-        "model_keys": ["sem_summary_model", "sem_stage2_model"],
+    "code_generation": {
+        "provider_keys": [
+            "code_generation_provider",
+            "code_provider",
+            "sem_evidence_provider",
+            "sem_stage1_provider",
+        ],
+        "model_keys": [
+            "code_generation_model",
+            "code_model",
+            "sem_evidence_model",
+            "sem_stage1_model",
+        ],
     },
     "prediction": {
-        "provider_keys": ["sem_decision_provider", "sem_prediction_provider"],
-        "model_keys": ["sem_decision_model", "sem_prediction_model"],
+        "provider_keys": [
+            "code_prediction_provider",
+            "code_decision_provider",
+            "sem_decision_provider",
+            "sem_prediction_provider",
+        ],
+        "model_keys": [
+            "code_prediction_model",
+            "code_decision_model",
+            "sem_decision_model",
+            "sem_prediction_model",
+        ],
     },
 }
 
@@ -256,10 +268,13 @@ def save_stage_artifacts(row, conf, timestamp):
     bundle_id = row.get("bundle_id", "unknown")
     base = os.path.join(run_output_dir(conf, timestamp), f"bundle_{bundle_id}")
     stage_specs = [
-        ("stage0_analysis", "sem_analysis_prompt", "sem_analysis_raw_response", None),
-        ("stage1_evidence", "sem_s1_prompt", "sem_s1_raw_response", "sem_s1_generated_code"),
-        ("stage2_summary", "sem_s2_prompt", "sem_s2_raw_response", "sem_s2_generated_code"),
-        ("stage3_decision", "sem_decision_prompt", "sem_decision_raw_response", None),
+        (
+            "stage1_code_generation",
+            "code_generation_prompt",
+            "code_generation_raw_response",
+            "code_generated_code",
+        ),
+        ("stage2_prediction", "code_prediction_prompt", "code_prediction_raw_response", None),
     ]
     for stage_name, input_key, output_key, code_key in stage_specs:
         stage_dir = os.path.join(base, stage_name)
@@ -318,7 +333,7 @@ async def process_samples(clients, samples, conf, timestamp, initial_results=Non
         row = dict(sample)
         async with semaphore:
             try:
-                updates, prediction, raw_response = await run_sem_agent(
+                updates, prediction, raw_response = await run_code_agent(
                     sample,
                     conf,
                     clients,
@@ -361,13 +376,28 @@ def _build_clients(conf):
     clients = {}
     resolved = {}
     prior_by_provider = {}
-    # sem_agent uses four roles: analysis, evidence retrieval, summary, and decision.
-    # New explicit keys are preferred; legacy keys remain as fallbacks for old configs.
+    # The code method uses two roles. code_* keys are preferred; sem_* keys remain
+    # fallbacks so existing config_sem.yaml files can run this method.
     role_keys = [
-        ("analysis", ["sem_analysis_api_key_env", "sem_code_api_key_env"]),
-        ("stage1", ["sem_evidence_api_key_env", "sem_stage1_api_key_env", "sem_code_api_key_env"]),
-        ("stage2", ["sem_summary_api_key_env", "sem_stage2_api_key_env", "sem_code_api_key_env"]),
-        ("prediction", ["sem_decision_api_key_env", "sem_prediction_api_key_env"]),
+        (
+            "code_generation",
+            [
+                "code_generation_api_key_env",
+                "code_api_key_env",
+                "sem_evidence_api_key_env",
+                "sem_stage1_api_key_env",
+                "sem_code_api_key_env",
+            ],
+        ),
+        (
+            "prediction",
+            [
+                "code_prediction_api_key_env",
+                "code_decision_api_key_env",
+                "sem_decision_api_key_env",
+                "sem_prediction_api_key_env",
+            ],
+        ),
     ]
     for role, config_keys in role_keys:
         provider = stage_provider(conf, role)
@@ -401,8 +431,8 @@ def load_resume(path):
 # ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="Run sem_agent bundle evaluation")
-    parser.add_argument("--config", default="config_sem.yaml")
+    parser = argparse.ArgumentParser(description="Run code-method bundle evaluation")
+    parser.add_argument("--config", default="config_code.yaml")
     parser.add_argument("--start_idx", type=int, default=0)
     parser.add_argument("--resume", default="")
     args = parser.parse_args()
