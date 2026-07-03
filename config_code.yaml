@@ -15,7 +15,7 @@ shuffle_seed: 41
 
 # Default LLM fallback
 llm_provider: openai          # gemini | openai
-model: gpt-5.1
+model: gpt-4.1-mini
 temperature: 0.0
 openai_send_temperature: false
 openai_reasoning_effort: "low"

@@ -64,6 +64,11 @@ def _build_code_generation_client(conf):
     }, {"api_key_env": env, "provider": provider, "model": model}
 
 
+def _safe_path_part(value):
+    text = str(value or "unknown").strip()
+    return "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in text) or "unknown"
+
+
 async def _run(args):
     with open(args.config, "r", encoding="utf-8") as handle:
         conf = yaml.safe_load(handle)
@@ -73,12 +78,26 @@ async def _run(args):
     if args.sample_idx < 0 or args.sample_idx >= len(samples):
         raise IndexError(f"sample_idx {args.sample_idx} out of range for {len(samples)} samples")
     sample = samples[args.sample_idx]
-
     client, resolved = _build_code_generation_client(conf)
+
+    run_group = f"{_safe_path_part(conf.get('dataset'))}_{_safe_path_part(resolved['model'])}"
+
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    out_dir = os.path.join(
+        ROOT,
+        "analysis",
+        "stage_1_code_generation",
+        run_group,
+        f"bundle_{sample['bundle_id']}_{stamp}",
+    )
+    conf["code_workspace_root"] = os.path.join(out_dir, "workspaces")
+    conf["output_dir"] = os.path.join(out_dir, "results")
+
     print(f">>> Config: {args.config}")
     print(f">>> Dataset: {conf['dataset']}")
     print(f">>> Bundle: {sample['bundle_id']}")
     print(f">>> Code generation model: {resolved['provider']} / {resolved['model']}")
+    print(f">>> Test output root: {out_dir}")
 
     inputs = build_code_generation_inputs(sample, conf)
     if args.debug_prompt:
@@ -97,13 +116,6 @@ async def _run(args):
         semantic_case=inputs["decision_case"],
     )
 
-    stamp = time.strftime("%Y%m%d_%H%M%S")
-    out_dir = os.path.join(
-        ROOT,
-        "analysis",
-        "stage_1_code_generation",
-        f"bundle_{sample['bundle_id']}_{stamp}",
-    )
     _write_text(os.path.join(out_dir, "input.txt"), result["prompt"])
     _write_text(os.path.join(out_dir, "output.txt"), result["raw_response"])
     _write_text(os.path.join(out_dir, "code.py"), result["generated_code"])
