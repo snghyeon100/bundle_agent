@@ -80,14 +80,16 @@ async def _run(args):
     sample = samples[args.sample_idx]
     client, resolved = _build_code_generation_client(conf)
 
-    run_group = f"{_safe_path_part(conf.get('dataset'))}_{_safe_path_part(resolved['model'])}"
+    dataset_group = _safe_path_part(conf.get("dataset"))
+    model_group = _safe_path_part(resolved["model"])
 
     stamp = time.strftime("%Y%m%d_%H%M%S")
     out_dir = os.path.join(
         ROOT,
         "analysis",
         "stage_1_code_generation",
-        run_group,
+        dataset_group,
+        model_group,
         f"bundle_{sample['bundle_id']}_{stamp}",
     )
     conf["code_workspace_root"] = os.path.join(out_dir, "workspaces")

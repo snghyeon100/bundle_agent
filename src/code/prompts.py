@@ -25,16 +25,12 @@ def _unified_case_context(case_view, semantic_case=None):
     for item_id in case_view.get("partial_item_ids", []):
         source = partial_text.get(int(item_id), {})
         entry = {"item_id": int(item_id), "text": source.get("text", "")}
-        if source.get("metadata"):
-            entry["metadata"] = source.get("metadata")
         unified["partial_items"].append(entry)
     for candidate in case_view.get("candidates", []):
         label = str(candidate.get("label", ""))
         item_id = int(candidate.get("item_id"))
         source = candidate_text.get(label, {})
         entry = {"label": label, "item_id": item_id, "text": source.get("text", "")}
-        if source.get("metadata"):
-            entry["metadata"] = source.get("metadata")
         unified["candidates"].append(entry)
     return unified
 
@@ -99,7 +95,7 @@ def code_generation_prompt(case_view, source_manifest, output_file, semantic_cas
         "bundle. Your code must NOT choose, rank, score, recommend, or reveal a final prediction. "
         "Your code only retrieves compact source-grounded evidence that can be attached next to "
         "the partial item texts and candidate item texts in a later prediction prompt.\n\n"
-        "Problem instance with IDs and text:\n"
+        "Problem instance with IDs and text only. Do not assume or use hidden category labels:\n"
         f"{pretty_json(unified_case)}\n\n"
         "Available data sources and their relation contracts:\n"
         f"{pretty_json(source_manifest)}\n\n"
@@ -114,18 +110,24 @@ def code_generation_prompt(case_view, source_manifest, output_file, semantic_cas
         "- IB x BI co-bundle context: treat the BI train source as a relation signal "
         "item -> train bundles -> co-occurring items/context. For a target item, find train "
         "bundles containing that item, then retrieve representative co-occurring item "
-        "titles/categories from those bundles.\n\n"
+        "titles/context from those bundles.\n\n"
         "That is only an example, not a required strategy and not a complete strategy list. "
-        "For the remaining strategy design, inspect the available sources and the item texts, "
-        "then choose the strongest sample-adaptive relation signals yourself. Possible source "
-        "families include item metadata, UI relations, content/description embeddings, CF/LightGCN "
-        "features, Spotify artist/album context, or keyword/category filtered bundle context, "
-        "but use them only when they fit this problem and are available. Load .pt files on CPU "
-        "with map_location='cpu'.\n\n"
+        "Do not stop by copying only this example. Implement at least three strategies in total. "
+        "In addition to any use of this example, inspect the source manifest and design at least "
+        "two sample-adaptive strategies yourself for this specific bundle problem. Each "
+        "self-designed strategy should name a concrete relation path from available sources and "
+        "explain why that path is useful for this partial/candidate set. "
+        "Possible source families include item text metadata, UI relations, content/description "
+        "embeddings, CF/LightGCN features, Spotify artist/album context, or keyword-filtered "
+        "bundle context, but use them only when they fit this problem and are available. "
+        "Load .pt files on CPU with map_location='cpu'.\n\n"
         "EVIDENCE RULES\n"
         "- Evidence strings must be short, source-grounded, and parseable by a later pipeline.\n"
         "- Each evidence string should name the relation path/source signal, then give compact "
-        "representative retrieved titles, categories, counts, or a sparse-evidence note.\n"
+        "representative retrieved titles, counts, relation context, or a sparse-evidence note.\n"
+        "- Do not use category metadata as a strategy input or evidence output. If item_info.json "
+        "contains fields such as cate, cate_id, category, category_id, genre category, or item "
+        "class labels, ignore those fields.\n"
         "- Include at most 5 representative titles/items per evidence string and append a compact "
         "count note when there are many more.\n"
         "- Keep evidence neutral. Do not say that a candidate is best, correct, compatible, "
@@ -152,7 +154,8 @@ def code_generation_prompt(case_view, source_manifest, output_file, semantic_cas
         "        \"data_sources\": [\"bi_train.txt\", \"item_info.json\"],\n"
         "        \"description\": \"Example strategy: retrieve train-bundle co-occurrence context for every target item.\",\n"
         "    },\n"
-        "    # Add your own sample-adaptive strategies here after inspecting the problem and sources.\n"
+        "    # Add at least two self-designed, sample-adaptive strategies from the source manifest.\n"
+        "    # The final STRATEGY_PLAN must contain at least three strategies in total.\n"
         "]\n"
         "\n"
         "def main():\n"
@@ -232,9 +235,9 @@ def decision_prompt(decision_case, evidence):
         f"You are a helpful and honest assistant. The following are multiple choice questions about {task_name}. "
         "You should directly answer the question by choosing the letter of the correct option. Only provide the letter "
         "of your answer, without any explanation or mentioning the option content.\n"
-        f"Question: Given the partial {bundle_name}:\n"
+        f"Question: Given the partial {bundle_name} below, which candidate {item_name} should be included into this {bundle_name}?\n"
+        f"Partial {bundle_name}:\n"
         f"{chr(10).join(partial_blocks)}\n"
-        f"which candidate {item_name} should be included into this {bundle_name}?\n"
         f"Options:\n{chr(10).join(option_blocks)}\n"
         'Your answer should indicate your choice with a single letter (e.g., "A," "B," "C," etc.).\n'
         "Choice:"

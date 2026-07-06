@@ -1,0 +1,33 @@
+# ============================================================
+# config_baseline.yaml - text-only prediction baseline
+# ============================================================
+
+# Dataset
+dataset: spotify                  # pog | pog_dense | spotify | spotify_sparse
+data_path: ./datasets
+
+# Evaluation
+num_cans: 10
+num_token: 5
+toy_eval: 250
+seed: 45
+shuffle_seed: 41
+
+# Default LLM fallback
+llm_provider: openai          # gemini | openai
+model: gpt-4.1-mini
+temperature: 0.0
+openai_send_temperature: false
+openai_reasoning_effort: ""
+
+# Baseline prediction stage
+baseline_prediction_provider: openai
+baseline_prediction_model: gpt-4.1-mini
+baseline_prediction_api_key_env: "DMLAB_KEY"
+baseline_prediction_max_output_tokens: 200
+
+# Retry and concurrency
+max_retries: 5
+retry_wait_seconds: 30
+max_concurrent: 1
+output_dir: ./results_baseline

@@ -104,6 +104,13 @@ def _compact_exec_context(result):
     return summary
 
 
+def strategy_count(evidence):
+    if not isinstance(evidence, dict):
+        return 0
+    strategies = evidence.get("strategies")
+    return len(strategies) if isinstance(strategies, list) else 0
+
+
 async def generate_code_evidence_once(
     *,
     bundle_id,
@@ -142,6 +149,12 @@ async def generate_code_evidence_once(
         if not execution_failed(result) and isinstance(result.get("evidence_json"), dict)
         else None
     )
+    if accepted is not None and strategy_count(accepted) < 3:
+        print(
+            f"  [Bundle {bundle_id}] Code evidence generation FAILED: "
+            f"expected at least 3 strategies, got {strategy_count(accepted)}."
+        )
+        accepted = None
     if accepted is None:
         summary = _compact_exec_context(result)
         print(f"  [Bundle {bundle_id}] Code evidence generation FAILED.")

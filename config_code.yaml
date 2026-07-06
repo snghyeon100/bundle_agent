@@ -3,13 +3,13 @@
 # ============================================================
 
 # Dataset
-dataset: pog                  # pog | pog_dense | spotify | spotify_sparse
+dataset: pog_dense                  # pog | pog_dense | spotify | spotify_sparse
 data_path: ./datasets
 
 # Evaluation
 num_cans: 10
 num_token: 5
-toy_eval: 5                   # -1 = full test set | N = first N samples
+toy_eval: 250                   # -1 = full test set | N = first N samples
 seed: 45
 shuffle_seed: 41
 
@@ -18,18 +18,18 @@ llm_provider: openai          # gemini | openai
 model: gpt-4.1-mini
 temperature: 0.0
 openai_send_temperature: false
-openai_reasoning_effort: "low"
+openai_reasoning_effort: ""
 
 # Stage 1: executable evidence code generation
 code_generation_provider: openai
-code_generation_model: gpt-5.1
+code_generation_model: gpt-4.1-mini
 code_generation_api_key_env: "DMLAB_KEY"
 code_generation_max_output_tokens: 16000
 
 # Stage 2: final prediction over item text + generated evidence
-code_prediction_provider: gemini
-code_prediction_model: gemini-3-flash-preview
-code_prediction_api_key_env: "GEMINI_API_KEY_3"
+code_prediction_provider: openai
+code_prediction_model: gpt-4.1-mini
+code_prediction_api_key_env: "DMLAB_KEY"
 code_prediction_max_output_tokens: 300
 
 # Workspace and generated-code safety

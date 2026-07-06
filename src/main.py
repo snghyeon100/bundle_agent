@@ -7,6 +7,7 @@ Usage:
 
 import argparse
 import asyncio
+import json
 import os
 import re
 import sys
@@ -144,7 +145,10 @@ def is_quota_error(exc):
 def is_retryable_error(exc):
     msg = str(exc).lower()
     return any(m in msg for m in ("503", "high demand", "overloaded", "service unavailable",
-                                   "temporarily unavailable", "try again later"))
+                                   "temporarily unavailable", "try again later",
+                                   "connection error", "api connection error",
+                                   "connection reset", "connection aborted",
+                                   "timeout", "timed out", "read timeout"))
 
 
 def _client_provider(client, conf):
@@ -157,6 +161,11 @@ def _client_obj(client):
     if isinstance(client, dict):
         return client.get("client")
     return client
+
+
+def openai_model_supports_reasoning(model):
+    name = str(model or "").strip().lower()
+    return name.startswith("o") or name.startswith("gpt-5")
 
 
 async def call_llm_once(client, model, contents, conf, max_output_tokens):
@@ -178,7 +187,7 @@ async def call_llm_once(client, model, contents, conf, max_output_tokens):
         "max_output_tokens": int(max_output_tokens),
     }
     effort = str(conf.get("openai_reasoning_effort", "")).strip()
-    if effort:
+    if effort and openai_model_supports_reasoning(model):
         request["reasoning"] = {"effort": effort}
     if bool(conf.get("openai_send_temperature", False)):
         request["temperature"] = float(conf.get("temperature", 0.0))
@@ -264,6 +273,18 @@ def _write_text(path, text):
         handle.write(str(text or ""))
 
 
+def _write_json_text(path, text):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    value = str(text or "").strip()
+    if value:
+        try:
+            value = json.dumps(json.loads(value), ensure_ascii=False, indent=2, default=str)
+        except json.JSONDecodeError:
+            pass
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(value)
+
+
 def save_stage_artifacts(row, conf, timestamp):
     bundle_id = row.get("bundle_id", "unknown")
     base = os.path.join(run_output_dir(conf, timestamp), f"bundle_{bundle_id}")
@@ -284,6 +305,21 @@ def save_stage_artifacts(row, conf, timestamp):
             _write_text(os.path.join(stage_dir, "output.txt"), row.get(output_key, ""))
         if code_key and str(row.get(code_key, "")).strip():
             _write_text(os.path.join(stage_dir, "code.py"), row.get(code_key, ""))
+
+    stage1_dir = os.path.join(base, "stage1_code_generation")
+    if str(row.get("code_evidence_json", "")).strip():
+        _write_json_text(os.path.join(stage1_dir, "evidence.json"), row.get("code_evidence_json", ""))
+    if str(row.get("code_execution_summary", "")).strip():
+        _write_json_text(
+            os.path.join(stage1_dir, "execution_summary.json"),
+            row.get("code_execution_summary", ""),
+        )
+
+    stage2_dir = os.path.join(base, "stage2_prediction")
+    if str(row.get("code_prediction_json", "")).strip():
+        _write_json_text(os.path.join(stage2_dir, "prediction.json"), row.get("code_prediction_json", ""))
+    if str(row.get("code_decision_case", "")).strip():
+        _write_json_text(os.path.join(stage2_dir, "decision_case.json"), row.get("code_decision_case", ""))
 
 
 def save_error_artifact(row, conf, timestamp, error_text):

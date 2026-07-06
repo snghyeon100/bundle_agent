@@ -28,7 +28,7 @@ DEFAULT_ALLOWED_FILES = [
 ]
 
 DEFAULT_FORBIDDEN_CODE_PATTERNS = [
-    r"\.\.",
+    r"(^|[\\\/])\.\.([\\\/]|$)",
     r"[A-Za-z]:\\",
     r"bi_full",
     r"bi_test_gt",

@@ -2,134 +2,216 @@
 
 ## Purpose
 
-`bundle_agent` is a simplified zero-shot bundle completion runner derived from the larger `LLM-ZeroShot` workspace. The repository keeps the baseline evaluation path as the default, keeps the optional two-step `candidate_reasoning` method, and includes the `sem_agent` method for raw-data evidence retrieval.
+`bundle_agent` is a zero-shot bundle completion workspace focused on the `src/code/` method:
 
-Large local artifacts are intentionally not committed. The `datasets/`, `results/`, `.env`, and Python cache directories are ignored by Git.
+```text
+Code generation -> Evidence execution -> Prediction
+```
+
+For each bundle-completion instance, an LLM first generates executable Python code that retrieves source-grounded evidence from local dataset files. The generated evidence is then attached next to partial items and candidate items, and a prediction LLM chooses the final candidate label.
+
+Large local artifacts are intentionally not committed. The `datasets/`, `results/`, `results_baseline/`, `.env`, workspace caches, and Python cache directories are ignored by Git.
 
 ## Repository Structure
 
-- `src/dataset.py`: loads BundleConstruction datasets, builds candidate multiple-choice samples, and formats item text.
-- `src/main.py`: runs baseline, candidate-reasoning, or sem_agent evaluation, saves partial/final CSV files, supports resume, retry, and separate API keys.
-- `src/sem_agent/`: Semantic agent prompts, graph evidence retrieval, reasoning, and final prediction orchestration.
-- `config.yaml`: controls dataset, model, evaluation seeds, API key env names, retry policy, and method options.
-- `requirements.txt`: minimal Python dependencies.
-- `datasets/`: local BundleConstruction dataset checkout plus copied embedding caches. This folder is ignored by Git.
-- `results/`: local output CSV files. This folder is ignored by Git except `.gitkeep` if present.
+- `src/dataset.py`: loads BundleConstruction datasets, builds multiple-choice samples, and formats item text.
+- `src/main.py`: main entry point for the `src/code/` method.
+- `src/code/`: code-generation evidence pipeline, prompts, shared helpers, and workspace wrapper.
+- `src/main_baseline.py`: text-only baseline entry point for separate comparison runs.
+- `config_code.yaml`: configuration for the code method.
+- `config_baseline.yaml`: configuration for the text-only baseline.
+- `tests/stage_1_code_generation/run.py`: isolated Stage 1 code-generation test runner.
+- `tests/stage_2_prediction/run.py`: isolated Stage 2 prediction test runner using a saved Stage 1 directory.
+- `datasets/`: local BundleConstruction datasets and feature files.
+- `results/`: full code-method outputs.
+- `analysis/`: stage-specific test outputs.
 
-## Baseline Method
+## Code Method
 
-The baseline method is active when:
+The active methodology is implemented under `src/code/`.
 
-```yaml
-use_candidate_reasoning: false
-```
+The pipeline has two conceptual stages:
 
-For each sample, the runner makes one LLM call. The prompt shows the partial bundle and all candidate options, then asks the model to return a single letter only.
+1. **Stage 1: Code Generation and Evidence Execution**
+   - The LLM receives the current bundle problem: partial item IDs/text, candidate item IDs/text, task description, and a source manifest.
+   - It generates executable Python code.
+   - The code runs in a prepared workspace with allowed local data files copied under `data/`.
+   - The code writes an `evidence.json` file with evidence for every partial item and every candidate item.
+   - There is no repair loop. If generated code fails or writes invalid evidence, the run prints failure and falls back to sparse placeholder evidence.
 
-Prompt shape:
+2. **Stage 2: Prediction**
+   - The prediction LLM receives the original partial/candidate item text with evidence lines attached directly under each item block.
+   - It returns only one label, such as `A` through `J`.
+
+The intended separation is:
 
 ```text
-You are a helpful and honest assistant. The following are multiple choice questions about {task_name}. You should directly answer the question by choosing the letter of the correct option. Only provide the letter of your answer, without any explanation or mentioning the option content.
-Question: Given the partial {bundle_name}: {input_str}, which candidate {item_name} should be included into this {bundle_name}?
-Options: {target_str}
-Your answer should indicate your choice with a single letter (e.g., "A," "B," "C," etc.).
+Stage 1: retrieve compact factual evidence using executable code
+Stage 2: choose the final candidate using item text plus retrieved evidence
+```
+
+Stage 1 must not choose, rank, score, recommend, or reveal a final prediction.
+
+## Stage 1 Evidence Schema
+
+Generated code must write JSON using the `code_evidence_v1` shape:
+
+```json
+{
+  "schema_version": "code_evidence_v1",
+  "strategies": [
+    {
+      "name": "strategy_name",
+      "relation_signal": "item -> source relation -> retrieved context",
+      "data_sources": ["bi_train.txt", "item_info.json"],
+      "description": "short strategy description"
+    }
+  ],
+  "partial_evidence": {
+    "partial_123": {
+      "item_id": 123,
+      "evidence": ["short source-grounded evidence string"]
+    }
+  },
+  "candidate_evidence": {
+    "A": {
+      "item_id": 456,
+      "evidence": ["short source-grounded evidence string"]
+    }
+  },
+  "policy_trace": {
+    "implemented_strategies": ["strategy name -> concrete relation path implemented"],
+    "skipped_strategies": ["strategy/view -> source or sparsity reason"],
+    "notes": ["short implementation or fallback note"]
+  }
+}
+```
+
+The prompt gives one example strategy style:
+
+```text
+IB x BI co-bundle context:
+item -> train bundles -> co-occurring items/context
+```
+
+This is only an example. The LLM is asked to inspect the source manifest and design at least two additional sample-adaptive strategies, for at least three strategies total.
+
+## Available Source Signals
+
+Allowed source files are configured in `config_code.yaml`.
+
+Typical sources:
+
+- `count.json`: dataset counts.
+- `item_info.json`: item text metadata. Category fields are redacted from the code-method source manifest and should not be used as evidence.
+- `bi_train.txt`: bundle-item train relations.
+- `ui_full.txt`: user-item interactions.
+- `content_feature.pt`: item content/image/audio feature tensor.
+- `description_feature.pt`: item text feature tensor.
+- `item_cf_feature.pt`: item collaborative feature tensor.
+- `{dataset}_LightGCN_bi_feature.pt`: BI LightGCN item feature tensor.
+
+The source manifest is treated as a set of typed relation contracts, not as final answer hints.
+
+## Prediction Prompt Shape
+
+The prediction prompt uses block formatting.
+
+For `pog` and `pog_dense`:
+
+```text
+You are a helpful and honest assistant. The following are multiple choice questions about bundle construction.
+You should directly answer the question by choosing the letter of the correct option. Only provide the letter of your answer, without any explanation or mentioning the option content.
+Question: Given the partial fashion outfit below, which candidate fashion item should be included into this fashion outfit?
+Partial fashion outfit:
+1. {partial item text}
+Evidence: {partial evidence lines}
+
+Options:
+A. {candidate item text}
+Evidence: {candidate evidence lines}
+...
 Choice:
 ```
 
-The output CSV stores `raw_response`, parsed `prediction`, and `hit`.
+For `spotify` and `spotify_sparse`, task names change to playlist continuation, music playlist, and song.
 
-## Candidate Reasoning Method
-
-The candidate reasoning method is active when:
-
-```yaml
-use_candidate_reasoning: true
-```
-
-Each sample uses two API calls total:
-
-1. One reasoning call using `reasoning_api_key_env` if configured.
-2. One final prediction call using `prediction_api_key_env` if configured.
-
-### Reasoning Call
-
-The reasoning call receives all candidate-completed bundles in one prompt. Each line appends one candidate item to the same input items. The candidate label is used only so the output can be mapped back into `reasoning_A` through `reasoning_J`.
-
-Fashion prompt shape:
+Spotify item text is formatted as:
 
 ```text
-You are a bundle construction analyst.
-Review the following completed fashion outfits. Each line appends one possible final item to the same input items.
-A: {input_str}; {candidate_A_text}
-B: {input_str}; {candidate_B_text}
-...
-For each completed fashion outfit, provide reasoning about how well the items work together. Discuss whether each outfit feels coherent in concept, seasonality, style, color or material harmony, and item-category compatibility.
-Write only concise reasoning in English. Use 2-3 sentences for each label. Do not choose an answer.
-Return exactly one reasoning paragraph for each label (A, B, ..., J) using this format:
-A: reasoning text
-B: reasoning text
-...
-Reasoning:
+track_name - artist_name - album_name
 ```
 
-Spotify prompt shape is the same, but refers to playlist continuation and asks about theme, mood, genre, artist or album context, and listening flow.
+Fashion item text uses the item title.
 
-The raw reasoning response is stored in `reasoning_raw_response`. Parsed per-candidate reasoning is stored in `reasoning_A`, `reasoning_B`, ..., `reasoning_J`.
+## Output Layout
 
-### Prediction Call
-
-The final prediction prompt shows each candidate option with its reasoning directly attached below the candidate text.
-
-Prompt shape:
+`src/main.py` saves artifacts under:
 
 ```text
-Options with reasoning:
-A. {candidate_A_text}
-Reasoning: {reasoning_A}
-B. {candidate_B_text}
-Reasoning: {reasoning_B}
-...
-Your answer should indicate your choice with a single letter (e.g., "A," "B," "C," etc.).
-Choice:
+results/{dataset}/{timestamp}/bundle_{bundle_id}/stage1_code_generation/
+  input.txt
+  output.txt
+  code.py
+  evidence.json
+  execution_summary.json
+
+results/{dataset}/{timestamp}/bundle_{bundle_id}/stage2_prediction/
+  input.txt
+  output.txt
+  prediction.json
+  decision_case.json
 ```
 
-The final raw response is stored in `raw_response`, the parsed answer in `prediction`, and correctness in `hit`.
-
-## Semantic Agent (sem_agent) Method
-
-The `sem_agent` method is active when configured to use the semantic pipeline.
-
-The methodology is separated into a three-step pipeline to isolate data retrieval from linguistic reasoning:
-
-1. **Stage 1 (Data Retrieval):** A code-generation LLM writes sample-specific Python code to traverse allowed raw files (e.g., `item_info.json`, `bi_train.txt`, `ui_full.txt`). Its only task is to fetch relevant item titles and relations for the partial bundle and candidates. It outputs purely factual, structural data in JSON (e.g., `"value": "Extracted N supporting items."`). It does not write narratives or reason about compatibility.
-2. **Stage 2 (Reasoning):** A pure-reasoning LLM receives the Stage 1 JSON evidence alongside the candidate metadata. Without writing any code, it interprets the retrieved item relations to construct the bundle context and assess candidate fit. It returns a concise JSON analysis describing why candidates do or do not fit the established aesthetic and functional context.
-3. **Decision (Final Predictor):** A final LLM predictor reads the Stage 2 reasoning and selects the best candidate label (A-J).
-
-This pure-retrieval / pure-reasoning separation prevents the code-generation LLM from struggling with string concatenation and natural language generation within Python, while allowing the Stage 2 LLM to focus entirely on semantic assessment.
-
-## Result Saving and Resume
-
-The runner saves one CSV row per fully completed sample.
-
-- Baseline mode writes a row after the single prediction call completes.
-- Candidate reasoning mode writes a row only after both reasoning and final prediction calls complete.
-- If candidate reasoning is interrupted during the reasoning or prediction step, the partial row for that sample is not saved.
-
-Partial files use this form:
+The run-level CSV is saved as:
 
 ```text
-results/{dataset}/results_{dataset}_{method}_C{num_cans}_T{num_token}_{timestamp}_partial.csv
+results/{dataset}/{timestamp}/results.csv
 ```
 
-Final files remove `_partial`.
+During an interrupted run, partial rows are saved as:
+
+```text
+results/{dataset}/{timestamp}/results_partial.csv
+```
 
 Resume is supported with:
 
 ```powershell
-python src/main.py --config config.yaml --resume path\to\partial.csv
+python src\main.py --config config_code.yaml --resume results\{dataset}\{timestamp}\results_partial.csv
 ```
 
-The resume logic uses the number of completed rows in the partial CSV and starts from the next unfinished sample.
+## Stage Test Outputs
+
+Stage-specific tests save outputs under `analysis/`.
+
+Stage 1:
+
+```text
+analysis/stage_1_code_generation/{dataset}/{code_generation_model}/bundle_{bundle_id}_{timestamp}/
+  input.txt
+  output.txt
+  code.py
+  evidence.json
+  execution_summary.json
+```
+
+Stage 2:
+
+```text
+analysis/stage_2_prediction/{dataset}/{prediction_model}/bundle_{bundle_id}_{timestamp}/
+  input.txt
+  output.txt
+  prediction.json
+  decision_case.json
+  evidence.json
+```
+
+Stage 2 can reuse a saved Stage 1 directory:
+
+```powershell
+python tests\stage_2_prediction\run.py --stage1_dir analysis\stage_1_code_generation\pog\gpt-4.1-mini\bundle_722_20260706_105433
+```
 
 ## Retry and Stop Policy
 
@@ -140,65 +222,25 @@ max_retries: 5
 retry_wait_seconds: 30
 ```
 
-Retryable errors include `503`, high-demand, overloaded, service unavailable, temporarily unavailable, and similar messages. Retry wait increases linearly by attempt.
+Retryable errors include overloaded/service unavailable messages, temporary provider failures, connection errors, connection resets, and timeouts. Retry wait increases linearly by attempt.
 
-Quota or permission errors such as `403`, quota, resource exhausted, permission denied, or billing stop the run immediately. Completed rows remain saved in the partial CSV for resume.
+Quota or permission errors such as `403`, quota, resource exhausted, permission denied, or billing stop the run immediately. Completed rows remain saved in `results_partial.csv` for resume.
 
 ## API Key Configuration
 
-Config:
+Code method uses separate clients for Stage 1 and Stage 2:
 
 ```yaml
-llm_provider: gemini
-model: gemini-3.1-flash-lite
-prediction_api_key_env: ""
-reasoning_api_key_env: ""
+code_generation_provider: openai
+code_generation_model: gpt-4.1-mini
+code_generation_api_key_env: "DMLAB_KEY"
+
+code_prediction_provider: openai
+code_prediction_model: gpt-4.1-mini
+code_prediction_api_key_env: "DMLAB_KEY"
 ```
 
-`llm_provider` selects the backend used by the shared LLM adapter:
-
-- `gemini`: uses the Google GenAI SDK and defaults to `GEMINI_API_KEY` or `GOOGLE_API_KEY`.
-- `openai`: uses the OpenAI SDK and defaults to `OPENAI_API_KEY`.
-
-If `prediction_api_key_env` is empty, the runner uses the provider default envs.
-
-If `reasoning_api_key_env` is empty, the runner falls back to the prediction key env and then the provider default envs.
-
-Example `.env`:
-
-```env
-GEMINI_REASONING_API_KEY=...
-GEMINI_PREDICTION_API_KEY=...
-OPENAI_API_KEY=...
-```
-
-Gemini example `config.yaml`:
-
-```yaml
-llm_provider: gemini
-model: gemini-3.1-flash-lite
-prediction_api_key_env: GEMINI_PREDICTION_API_KEY
-reasoning_api_key_env: GEMINI_REASONING_API_KEY
-```
-
-OpenAI example `config.yaml`:
-
-```yaml
-llm_provider: openai
-model: gpt-4o
-openai_send_temperature: false
-openai_reasoning_effort: minimal
-prediction_api_key_env: OPENAI_API_KEY
-reasoning_api_key_env: OPENAI_API_KEY
-agent_planning_api_key_env: OPENAI_API_KEY
-agent_code_api_key_env: OPENAI_API_KEY
-agent_verifier_api_key_env: OPENAI_API_KEY
-agent_prediction_api_key_env: OPENAI_API_KEY
-```
-
-For OpenAI, `openai_send_temperature` defaults to false in practice and should stay false for GPT-5 models because some GPT-5 models reject the `temperature` parameter. Set it to true only for OpenAI models that support temperature and when temperature control is needed.
-
-For GPT-5 models, `openai_reasoning_effort: minimal` is recommended for this multi-call agent by default. Higher reasoning effort can consume the configured `max_output_tokens` budget before visible text is produced, especially in code-writing and verifier stages.
+For OpenAI models, `openai_reasoning_effort` is sent only to models that support reasoning parameters. It should be left empty for models such as `gpt-4.1-mini`.
 
 ## Reproducibility
 
@@ -214,31 +256,137 @@ dataset
 data_path
 ```
 
-Candidate negatives are filtered against the full test-GT graph before `toy_eval` truncates the list of evaluated pairs. This matches the original `Bundle_zero` candidate generation and prevents the negative-candidate pool from changing with `toy_eval`. The full test GT is used only inside dataset sample construction to exclude known true items; it is never copied into the agent workspace or exposed to an LLM prompt.
+Candidate negatives are filtered against the full test-GT graph before `toy_eval` truncates the evaluated pairs. This matches the original candidate generation protocol and prevents the negative-candidate pool from changing with `toy_eval`.
 
-The exact LLM responses can still vary slightly despite `temperature: 0.0` because provider-side generation behavior is not guaranteed to be bit-for-bit deterministic.
+The exact LLM outputs can still vary slightly despite `temperature: 0.0` because provider-side generation is not guaranteed to be bit-for-bit deterministic.
 
-## Self-Generated LightGCN Features
+## Instance Diagnostics and Bundle Clustering
 
-`utils/train_lightgcn_features.py` trains LightGCN item features directly from local raw relational data when existing CF feature provenance is unclear.
+A useful analysis direction is to treat each bundle-completion instance as having its own evidence topology across BI relations, UI relations, and multimodal feature spaces.
 
-Default behavior:
+Instead of only reporting overall accuracy, compute deterministic diagnostics for each bundle and cluster instances into source-topology types.
 
-- UI graph: trains on `ui_full.txt`, treating users as contexts and items as targets.
-- BI graph: trains on `bi_train.txt`, treating bundles as contexts and items as targets.
-- Initialization: Xavier uniform.
-- Objective: BPR ranking loss with uniform unobserved-item negative sampling.
-- Propagation: LightGCN layer averaging over `E^(0)..E^(K)`.
-- Outputs: `ui_item_embeddings.pt`, `bi_item_embeddings.pt`, and metadata JSON files under `datasets/<dataset>/lightgcn_self/`.
+Recommended diagnostics:
 
-Example BI-only smoke/debug run:
+- `source_coverage`: how many partial/candidate items are observed in each source.
+- `direct_relation_strength`: BI co-bundle counts and UI user-overlap counts between partial items and candidates.
+- `embedding_contrast`: candidate-to-partial similarity margins in content, description, CF, and LightGCN spaces.
+- `partial_bundle_coherence`: how tightly partial items connect to each other in relation or embedding space.
+- `source_agreement`: whether multiple sources point to the same top candidate.
+- `sparsity_profile`: whether the instance is relation-rich, embedding-driven, source-conflicting, low-contrast, or sparse.
 
-```powershell
-python utils\train_lightgcn_features.py --dataset pog_dense --graphs bi --epochs 1 --max-train-edges 10000
+Example diagnostic row:
+
+```text
+bundle_id,
+bi_partial_coverage,
+bi_candidate_coverage,
+max_bi_relation,
+bi_margin,
+ui_partial_coverage,
+max_ui_relation,
+content_top_score,
+content_margin,
+description_top_score,
+description_margin,
+partial_content_cohesion,
+partial_description_cohesion,
+source_top_consensus,
+num_sources_with_signal,
+cluster_labels,
+prediction,
+gt_label,
+hit
 ```
 
-Example full run:
+Possible cluster labels:
 
-```powershell
-python utils\train_lightgcn_features.py --dataset pog_dense --graphs ui bi --embedding-dim 64 --num-layers 3 --epochs 100
-```\n
+- `relation_rich`: BI/UI coverage is high and direct relation margins are strong.
+- `embedding_driven`: relational signals are weak but embedding contrast is strong.
+- `multi_source_agreement`: multiple sources identify the same likely candidate.
+- `source_conflict`: different sources point to different candidates.
+- `low_contrast_ambiguous`: candidates have similar evidence strength.
+- `sparse_hard`: most sources have weak or missing signals.
+- `partial_incoherent`: partial items are internally weakly connected.
+
+These labels can be multi-label. For example:
+
+```json
+["embedding_driven", "source_conflict"]
+```
+
+This enables analysis such as:
+
+- Performance by instance type.
+- Whether code-method gains are larger on relation-rich or embedding-driven samples.
+- Whether generated strategy families align with deterministic bundle diagnostics.
+- Whether strategy-diagnostic alignment correlates with accuracy.
+
+The main research framing is:
+
+```text
+Bundle completion instances are heterogeneous. Each instance has its own evidence topology across bundle-item, user-item, and multimodal similarity relations. Code generation acts as an instance-adaptive evidence compiler that selects and materializes relation paths suited to the current bundle.
+```
+
+## Strategy Auditing
+
+LLM-generated strategy names are not stable enough for direct statistics. The same relation path may be named in many ways, such as:
+
+```text
+ib_x_bi_cobundle_context
+bi_train_cooccurrence
+bundle_item_neighbor_retrieval
+train_bundle_item_expansion
+```
+
+Use rule-based canonicalization based on actual source and relation footprints.
+
+Recommended canonical families:
+
+- `bi_cobundle`
+- `ui_user_relation`
+- `content_embedding`
+- `description_embedding`
+- `item_cf_embedding`
+- `bi_lightgcn_embedding`
+- `metadata_text`
+- `sparse_fallback`
+- `unknown`
+
+Classification should use:
+
+```text
+strategies[].name
+strategies[].relation_signal
+strategies[].data_sources
+strategies[].description
+policy_trace.implemented_strategies
+partial_evidence.*.evidence
+candidate_evidence.*.evidence
+```
+
+The audit output can be stored as:
+
+```text
+analysis/strategy_audit/{dataset}/{run_id}/strategy_audit.csv
+```
+
+Useful columns:
+
+```text
+bundle_id,
+prediction,
+gt_label,
+hit,
+raw_strategy_names,
+canonical_families,
+uses_bi_cobundle,
+uses_ui_user_relation,
+uses_content_embedding,
+uses_description_embedding,
+uses_item_cf_embedding,
+uses_bi_lightgcn_embedding,
+uses_sparse_fallback,
+num_canonical_families
+```
+
