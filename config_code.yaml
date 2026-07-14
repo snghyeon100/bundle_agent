@@ -3,7 +3,7 @@
 # ============================================================
 
 # Dataset
-dataset: pog_dense                  # pog | pog_dense | spotify | spotify_sparse
+dataset: pog        # pog | pog_dense | spotify | spotify_sparse
 data_path: ./datasets
 
 # Evaluation

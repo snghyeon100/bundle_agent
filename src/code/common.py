@@ -25,18 +25,8 @@ def candidate_labels(case_view):
 def task_semantics(dataset):
     name = str(dataset or "").lower()
     if "spotify" in name:
-        return (
-            "This is playlist continuation. A partial bundle is a music playlist, and each "
-            "candidate is a possible next song. Useful evidence may involve co-playlist "
-            "relations, user-item listening relations, artist/album/theme context, and "
-            "audio/text embedding neighbors."
-        )
-    return (
-        "This is fashion outfit bundle completion. A partial bundle is a coordinated set "
-        "of fashion items, and each candidate is a possible missing item. Useful evidence "
-        "may involve co-outfit relations, role/style complementarity, user-item relations, "
-        "metadata context, and image/text embedding neighbors."
-    )
+        return "This is music-playlist continuation."
+    return "This is fashion-outfit bundle completion."
 
 
 def compact_json(value):

@@ -2,6 +2,7 @@
 
 Usage:
     .\\.venv\\Scripts\\python.exe tests\\stage_1_code_generation\\run.py --config config_code.yaml
+    .\\.venv\\Scripts\\python.exe tests\\stage_1_code_generation\\run.py --sample_idx 0 --count 5
 """
 
 import argparse
@@ -77,67 +78,104 @@ async def _run(args):
     samples = BundleZeroShotDataset(conf).get_eval_samples()
     if args.sample_idx < 0 or args.sample_idx >= len(samples):
         raise IndexError(f"sample_idx {args.sample_idx} out of range for {len(samples)} samples")
-    sample = samples[args.sample_idx]
+    if args.count < 1:
+        raise ValueError(f"count must be at least 1, got {args.count}")
+
+    end_idx = min(args.sample_idx + args.count, len(samples))
+    selected = list(enumerate(samples[args.sample_idx:end_idx], start=args.sample_idx))
+    if len(selected) < args.count:
+        print(
+            f">>> Warning: requested {args.count} samples from index {args.sample_idx}, "
+            f"but only {len(selected)} are available."
+        )
+
     client, resolved = _build_code_generation_client(conf)
 
     dataset_group = _safe_path_part(conf.get("dataset"))
     model_group = _safe_path_part(resolved["model"])
 
-    stamp = time.strftime("%Y%m%d_%H%M%S")
-    out_dir = os.path.join(
-        ROOT,
-        "analysis",
-        "stage_1_code_generation",
-        dataset_group,
-        model_group,
-        f"bundle_{sample['bundle_id']}_{stamp}",
-    )
-    conf["code_workspace_root"] = os.path.join(out_dir, "workspaces")
-    conf["output_dir"] = os.path.join(out_dir, "results")
-
     print(f">>> Config: {args.config}")
     print(f">>> Dataset: {conf['dataset']}")
-    print(f">>> Bundle: {sample['bundle_id']}")
     print(f">>> Code generation model: {resolved['provider']} / {resolved['model']}")
-    print(f">>> Test output root: {out_dir}")
-
-    inputs = build_code_generation_inputs(sample, conf)
-    if args.debug_prompt:
-        print_debug("Stage 1 Code Generation Prompt", inputs["prompt"])
-
-    result = await generate_code_evidence_once(
-        bundle_id=sample["bundle_id"],
-        case_view=inputs["case_view"],
-        source_manifest=inputs["source_manifest"],
-        initial_prompt=inputs["prompt"],
-        client=client,
-        conf=conf,
-        generate_content_fn=generate_content_with_retry,
-        workspace=inputs["workspace"],
-        output_file=inputs["evidence_output_file"],
-        semantic_case=inputs["decision_case"],
+    print(
+        f">>> Samples: indices {args.sample_idx}..{end_idx - 1} "
+        f"({len(selected)} total)"
     )
 
-    _write_text(os.path.join(out_dir, "input.txt"), result["prompt"])
-    _write_text(os.path.join(out_dir, "output.txt"), result["raw_response"])
-    _write_text(os.path.join(out_dir, "code.py"), result["generated_code"])
-    _write_json(os.path.join(out_dir, "execution_summary.json"), result["execution_summary"])
-    if result["accepted_evidence"] is not None:
-        _write_json(os.path.join(out_dir, "evidence.json"), result["execution_result"].get("evidence_json"))
+    succeeded = 0
+    failed = 0
+    for position, (sample_idx, sample) in enumerate(selected, start=1):
+        sample_conf = dict(conf)
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        out_dir = os.path.join(
+            ROOT,
+            "analysis",
+            "stage_1_code_generation",
+            dataset_group,
+            model_group,
+            f"bundle_{sample['bundle_id']}_{stamp}",
+        )
+        if os.path.exists(out_dir):
+            out_dir += f"_sample{sample_idx}"
+        sample_conf["code_workspace_root"] = os.path.join(out_dir, "workspaces")
+        sample_conf["output_dir"] = os.path.join(out_dir, "results")
 
-    print(f">>> Artifacts: {out_dir}")
-    if result["accepted_evidence"] is None:
-        print(">>> Stage 1 FAILED: generated code did not execute into parseable JSON.")
-        return 1
+        print(f">>> [{position}/{len(selected)}] Sample index: {sample_idx}")
+        print(f">>> Bundle: {sample['bundle_id']}")
+        print(f">>> Test output root: {out_dir}")
 
-    print(">>> Stage 1 OK: generated code executed and produced parseable JSON.")
-    return 0
+        inputs = build_code_generation_inputs(sample, sample_conf)
+        if args.debug_prompt:
+            print_debug("Stage 1 Code Generation Prompt", inputs["prompt"])
+
+        result = await generate_code_evidence_once(
+            bundle_id=sample["bundle_id"],
+            case_view=inputs["case_view"],
+            source_manifest=inputs["source_manifest"],
+            initial_prompt=inputs["prompt"],
+            client=client,
+            conf=sample_conf,
+            generate_content_fn=generate_content_with_retry,
+            workspace=inputs["workspace"],
+            output_file=inputs["evidence_output_file"],
+            semantic_case=inputs["decision_case"],
+        )
+
+        _write_text(os.path.join(out_dir, "input.txt"), result["prompt"])
+        _write_text(os.path.join(out_dir, "output.txt"), result["raw_response"])
+        _write_text(os.path.join(out_dir, "code.py"), result["generated_code"])
+        _write_json(os.path.join(out_dir, "execution_summary.json"), result["execution_summary"])
+        if result["accepted_evidence"] is not None:
+            _write_json(
+                os.path.join(out_dir, "evidence.json"),
+                result["execution_result"].get("evidence_json"),
+            )
+
+        print(f">>> Artifacts: {out_dir}")
+        if result["accepted_evidence"] is None:
+            failed += 1
+            issues = result.get("validation_issues", [])
+            if issues:
+                print(">>> Validation issues: " + " | ".join(str(issue) for issue in issues))
+            print(">>> Stage 1 FAILED: generated code did not produce valid adaptive item evidence.")
+        else:
+            succeeded += 1
+            print(">>> Stage 1 OK: generated code executed and produced valid adaptive item evidence.")
+
+    print(f">>> Summary: {succeeded} succeeded, {failed} failed, {len(selected)} total")
+    return 1 if failed else 0
 
 
 def main():
     parser = argparse.ArgumentParser(description="Run Stage 1 code generation only")
     parser.add_argument("--config", default="config_code.yaml")
     parser.add_argument("--sample_idx", type=int, default=0)
+    parser.add_argument(
+        "--count",
+        type=int,
+        default=1,
+        help="Number of consecutive samples to run, starting at --sample_idx (default: 1)",
+    )
     parser.add_argument("--debug_prompt", action="store_true")
     args = parser.parse_args()
     return asyncio.run(_run(args))

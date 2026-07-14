@@ -1,7 +1,5 @@
 """Workspace utilities for generated evidence code."""
 
-import copy
-
 from sem_agent import workspace as _sem_workspace
 
 
@@ -29,18 +27,7 @@ def prepare_workspace(conf, config_prefix="code"):
 
 
 def build_source_manifest(workspace, current_bundle_policy):
-    manifest = copy.deepcopy(_sem_workspace.build_source_manifest(workspace, current_bundle_policy))
-    for source in manifest.get("sources", []):
-        for container in (source, source.get("contract")):
-            if not isinstance(container, dict):
-                continue
-            fields = container.get("fields")
-            if isinstance(fields, dict):
-                for key in list(fields):
-                    lowered = str(key).lower()
-                    if lowered in {"cate", "cate_id", "category", "category_id"}:
-                        fields.pop(key, None)
-    return manifest
+    return _sem_workspace.build_source_manifest(workspace, current_bundle_policy)
 
 
 def execute_generated_code(code, conf, workspace, output_file, script_name, config_prefix="code"):

@@ -104,11 +104,113 @@ def _compact_exec_context(result):
     return summary
 
 
-def strategy_count(evidence):
+def validate_adaptive_item_evidence(evidence, case_view):
+    """Return deterministic schema/identity issues for Stage 1 evidence."""
     if not isinstance(evidence, dict):
-        return 0
-    strategies = evidence.get("strategies")
-    return len(strategies) if isinstance(strategies, list) else 0
+        return ["evidence must be a JSON object"]
+
+    issues = []
+    allowed_fields = {
+        "schema_version",
+        "strategy",
+        "partial_evidence",
+        "candidate_evidence",
+    }
+    unexpected = sorted(set(evidence) - allowed_fields)
+    missing = sorted(allowed_fields - set(evidence))
+    if unexpected:
+        issues.append("unexpected top-level fields: " + ", ".join(unexpected))
+    if missing:
+        issues.append("missing top-level fields: " + ", ".join(missing))
+    if evidence.get("schema_version") != "adaptive_item_evidence_v1":
+        issues.append("schema_version must be adaptive_item_evidence_v1")
+
+    strategy = evidence.get("strategy")
+    if not isinstance(strategy, dict):
+        issues.append("strategy must be an object")
+    else:
+        if set(strategy) != {"name", "description"}:
+            issues.append("strategy must contain exactly name and description")
+        for key in ("name", "description"):
+            if not isinstance(strategy.get(key), str) or not strategy.get(key, "").strip():
+                issues.append(f"strategy.{key} must be non-empty")
+
+    expected_partials = {
+        f"partial_{int(item_id)}": int(item_id)
+        for item_id in case_view.get("partial_item_ids", [])
+    }
+    partial_payloads = evidence.get("partial_evidence")
+    if not isinstance(partial_payloads, dict):
+        issues.append("partial_evidence must be an object")
+        partial_payloads = {}
+    actual_partial_keys = set(partial_payloads)
+    expected_partial_keys = set(expected_partials)
+    if actual_partial_keys != expected_partial_keys:
+        missing_keys = sorted(expected_partial_keys - actual_partial_keys)
+        extra_keys = sorted(actual_partial_keys - expected_partial_keys)
+        if missing_keys:
+            issues.append("missing partial evidence keys: " + ", ".join(missing_keys))
+        if extra_keys:
+            issues.append("unexpected partial evidence keys: " + ", ".join(extra_keys))
+
+    for key, item_id in expected_partials.items():
+        payload = partial_payloads.get(key)
+        if not isinstance(payload, dict):
+            if key in partial_payloads:
+                issues.append(f"partial {key} evidence must be an object")
+            continue
+        if set(payload) != {"item_id", "evidence"}:
+            issues.append(f"partial {key} must contain exactly item_id and evidence")
+        try:
+            actual_item_id = int(payload.get("item_id"))
+        except (TypeError, ValueError):
+            actual_item_id = None
+        if actual_item_id != item_id:
+            issues.append(f"partial {key} item ID mismatch")
+        lines = payload.get("evidence")
+        if not isinstance(lines, list) or not lines or not all(
+            isinstance(line, str) and line.strip() for line in lines
+        ):
+            issues.append(f"partial {key} evidence must be a non-empty string list")
+
+    expected_candidates = {
+        str(candidate.get("label")): int(candidate.get("item_id"))
+        for candidate in case_view.get("candidates", [])
+    }
+    candidate_payloads = evidence.get("candidate_evidence")
+    if not isinstance(candidate_payloads, dict):
+        issues.append("candidate_evidence must be an object")
+        candidate_payloads = {}
+    actual_labels = set(candidate_payloads)
+    expected_labels = set(expected_candidates)
+    if actual_labels != expected_labels:
+        missing_labels = sorted(expected_labels - actual_labels)
+        extra_labels = sorted(actual_labels - expected_labels)
+        if missing_labels:
+            issues.append("missing candidate labels: " + ", ".join(missing_labels))
+        if extra_labels:
+            issues.append("unexpected candidate labels: " + ", ".join(extra_labels))
+
+    for label, candidate_id in expected_candidates.items():
+        payload = candidate_payloads.get(label)
+        if not isinstance(payload, dict):
+            if label in candidate_payloads:
+                issues.append(f"candidate {label} evidence must be an object")
+            continue
+        if set(payload) != {"item_id", "evidence"}:
+            issues.append(f"candidate {label} must contain exactly item_id and evidence")
+        try:
+            actual_candidate_id = int(payload.get("item_id"))
+        except (TypeError, ValueError):
+            actual_candidate_id = None
+        if actual_candidate_id != candidate_id:
+            issues.append(f"candidate {label} item ID mismatch")
+        lines = payload.get("evidence")
+        if not isinstance(lines, list) or not lines or not all(
+            isinstance(line, str) and line.strip() for line in lines
+        ):
+            issues.append(f"candidate {label} evidence must be a non-empty string list")
+    return issues
 
 
 async def generate_code_evidence_once(
@@ -149,22 +251,26 @@ async def generate_code_evidence_once(
         if not execution_failed(result) and isinstance(result.get("evidence_json"), dict)
         else None
     )
-    if accepted is not None and strategy_count(accepted) < 3:
-        print(
-            f"  [Bundle {bundle_id}] Code evidence generation FAILED: "
-            f"expected at least 3 strategies, got {strategy_count(accepted)}."
-        )
-        accepted = None
+    validation_issues = []
     if accepted is None:
-        summary = _compact_exec_context(result)
+        validation_issues.append("execution failed or evidence JSON was missing")
+    else:
+        validation_issues = validate_adaptive_item_evidence(accepted, case_view)
+    if validation_issues:
+        accepted = None
+    summary = _compact_exec_context(result)
+    summary["validation_issues"] = validation_issues
+    if accepted is None:
         print(f"  [Bundle {bundle_id}] Code evidence generation FAILED.")
+        print(f"  [Bundle {bundle_id}] Validation issues: {' | '.join(validation_issues)}")
         print(f"  [Bundle {bundle_id}] Execution summary: {compact_json(summary)}")
     return {
         "prompt": initial_prompt,
         "raw_response": raw,
         "generated_code": code,
         "execution_result": result,
-        "execution_summary": _compact_exec_context(result),
+        "execution_summary": summary,
+        "validation_issues": validation_issues,
         "accepted_evidence": accepted,
     }
 
@@ -177,7 +283,7 @@ def build_code_generation_inputs(sample, conf):
         str(conf.get("code_current_bundle_train_context_policy", conf.get("sem_current_bundle_train_context_policy", "allow"))),
     )
     decision_case = build_decision_case(sample, conf)
-    evidence_output_file = f"output/code_evidence_bundle{sample['bundle_id']}.json"
+    evidence_output_file = f"output/adaptive_item_evidence_bundle{sample['bundle_id']}.json"
     prompt = code_generation_prompt(
         case_view,
         source_manifest,
@@ -191,53 +297,6 @@ def build_code_generation_inputs(sample, conf):
         "decision_case": decision_case,
         "evidence_output_file": evidence_output_file,
         "prompt": prompt,
-    }
-
-
-def _empty_evidence(case_view):
-    partial_evidence = {
-        f"partial_{int(item_id)}": {
-            "item_id": int(item_id),
-            "evidence": ["sparse note: code evidence generation did not produce accepted evidence"],
-        }
-        for item_id in case_view.get("partial_item_ids", [])
-    }
-    candidate_evidence = {
-        str(candidate.get("label")): {
-            "item_id": int(candidate.get("item_id")),
-            "evidence": ["sparse note: code evidence generation did not produce accepted evidence"],
-        }
-        for candidate in case_view.get("candidates", [])
-    }
-    return {
-        "schema_version": "code_evidence_v1",
-        "strategies": [
-            {
-                "name": "fallback_sparse_note",
-                "relation_signal": "none",
-                "data_sources": [],
-                "description": "Fallback evidence used when generated code was not accepted.",
-            },
-            {
-                "name": "fallback_missing_relation_signal_1",
-                "relation_signal": "none",
-                "data_sources": [],
-                "description": "Placeholder to preserve schema shape after failed code generation.",
-            },
-            {
-                "name": "fallback_missing_relation_signal_2",
-                "relation_signal": "none",
-                "data_sources": [],
-                "description": "Placeholder to preserve schema shape after failed code generation.",
-            },
-        ],
-        "partial_evidence": partial_evidence,
-        "candidate_evidence": candidate_evidence,
-        "policy_trace": {
-            "implemented_strategies": [],
-            "skipped_strategies": ["generated code output was not accepted"],
-            "notes": [],
-        },
     }
 
 
@@ -286,8 +345,29 @@ async def run_code_agent(
         output_file=evidence_output_file,
         semantic_case=decision_case,
     )
-    evidence = code_result["accepted_evidence"] or _empty_evidence(case_view)
-    print(f"  [Bundle {sample['bundle_id']}] Code evidence generation completed.")
+    evidence = code_result["accepted_evidence"]
+
+    row = {
+        "code_workspace_dir": workspace["workspace_dir"],
+        "code_workspace_files": compact_json(workspace["files"]),
+        "code_source_manifest": compact_json(source_manifest),
+        "code_case_view": compact_json(case_view),
+        "code_decision_case": compact_json(decision_case),
+        "code_generation_prompt": c_prompt,
+        "code_generation_raw_response": code_result["raw_response"],
+        "code_generated_code": code_result["generated_code"],
+        "code_execution_summary": compact_json(code_result["execution_summary"]),
+        "code_evidence_validation_issues": compact_json(code_result["validation_issues"]),
+        "code_evidence_accepted": evidence is not None,
+        "code_evidence_json": compact_json(evidence) if evidence is not None else "",
+        "code_stage1_status": "accepted" if evidence is not None else "failed",
+    }
+    if evidence is None:
+        failure = "ERR_CODE: Stage 1 did not produce accepted adaptive item evidence"
+        print(f"  [Bundle {sample['bundle_id']}] Stage 2 skipped: {failure}")
+        return row, "ERR_CODE", failure
+
+    print(f"  [Bundle {sample['bundle_id']}] Adaptive item evidence generation completed.")
 
     p_prompt = decision_prompt(decision_case, evidence)
     if is_first_sample and debug_callback:
@@ -303,20 +383,11 @@ async def run_code_agent(
     )
     prediction, prediction_json = _parse_prediction(p_raw, prediction_parser, labels)
 
-    row = {
-        "code_workspace_dir": workspace["workspace_dir"],
-        "code_workspace_files": compact_json(workspace["files"]),
-        "code_source_manifest": compact_json(source_manifest),
-        "code_case_view": compact_json(case_view),
-        "code_decision_case": compact_json(decision_case),
-        "code_generation_prompt": c_prompt,
-        "code_generation_raw_response": code_result["raw_response"],
-        "code_generated_code": code_result["generated_code"],
-        "code_execution_summary": compact_json(code_result["execution_summary"]),
-        "code_evidence_accepted": code_result["accepted_evidence"] is not None,
-        "code_evidence_json": compact_json(evidence),
-        "code_prediction_prompt": p_prompt,
-        "code_prediction_raw_response": p_raw,
-        "code_prediction_json": compact_json(prediction_json),
-    }
+    row.update(
+        {
+            "code_prediction_prompt": p_prompt,
+            "code_prediction_raw_response": p_raw,
+            "code_prediction_json": compact_json(prediction_json),
+        }
+    )
     return row, prediction, p_raw
