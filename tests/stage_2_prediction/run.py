@@ -59,8 +59,6 @@ def _build_prediction_client(conf):
         [
             "code_prediction_api_key_env",
             "code_decision_api_key_env",
-            "sem_decision_api_key_env",
-            "sem_prediction_api_key_env",
         ],
         default_api_key_envs_for_provider(provider),
     )
@@ -115,7 +113,7 @@ async def _run(args):
         resolved["model"],
         prompt,
         conf,
-        int(conf.get("code_prediction_max_output_tokens", conf.get("sem_prediction_max_output_tokens", 300))),
+        int(conf.get("code_prediction_max_output_tokens", 300)),
         "stage 2 prediction test",
     )
     prediction = parse_model_response(raw)

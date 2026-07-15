@@ -104,7 +104,7 @@ def _compact_exec_context(result):
     return summary
 
 
-def validate_adaptive_item_evidence(evidence, case_view):
+def validate_adaptive_bundle_evidence(evidence, case_view):
     """Return deterministic schema/identity issues for Stage 1 evidence."""
     if not isinstance(evidence, dict):
         return ["evidence must be a JSON object"]
@@ -112,8 +112,9 @@ def validate_adaptive_item_evidence(evidence, case_view):
     issues = []
     allowed_fields = {
         "schema_version",
+        "intent",
         "strategy",
-        "partial_evidence",
+        "partial_bundle_evidence",
         "candidate_evidence",
     }
     unexpected = sorted(set(evidence) - allowed_fields)
@@ -122,8 +123,12 @@ def validate_adaptive_item_evidence(evidence, case_view):
         issues.append("unexpected top-level fields: " + ", ".join(unexpected))
     if missing:
         issues.append("missing top-level fields: " + ", ".join(missing))
-    if evidence.get("schema_version") != "adaptive_item_evidence_v1":
-        issues.append("schema_version must be adaptive_item_evidence_v1")
+    if evidence.get("schema_version") != "adaptive_bundle_evidence_v2":
+        issues.append("schema_version must be adaptive_bundle_evidence_v2")
+
+    intent = evidence.get("intent")
+    if not isinstance(intent, str) or not intent.strip():
+        issues.append("intent must be a non-empty string")
 
     strategy = evidence.get("strategy")
     if not isinstance(strategy, dict):
@@ -135,43 +140,17 @@ def validate_adaptive_item_evidence(evidence, case_view):
             if not isinstance(strategy.get(key), str) or not strategy.get(key, "").strip():
                 issues.append(f"strategy.{key} must be non-empty")
 
-    expected_partials = {
-        f"partial_{int(item_id)}": int(item_id)
-        for item_id in case_view.get("partial_item_ids", [])
-    }
-    partial_payloads = evidence.get("partial_evidence")
-    if not isinstance(partial_payloads, dict):
-        issues.append("partial_evidence must be an object")
-        partial_payloads = {}
-    actual_partial_keys = set(partial_payloads)
-    expected_partial_keys = set(expected_partials)
-    if actual_partial_keys != expected_partial_keys:
-        missing_keys = sorted(expected_partial_keys - actual_partial_keys)
-        extra_keys = sorted(actual_partial_keys - expected_partial_keys)
-        if missing_keys:
-            issues.append("missing partial evidence keys: " + ", ".join(missing_keys))
-        if extra_keys:
-            issues.append("unexpected partial evidence keys: " + ", ".join(extra_keys))
-
-    for key, item_id in expected_partials.items():
-        payload = partial_payloads.get(key)
-        if not isinstance(payload, dict):
-            if key in partial_payloads:
-                issues.append(f"partial {key} evidence must be an object")
-            continue
-        if set(payload) != {"item_id", "evidence"}:
-            issues.append(f"partial {key} must contain exactly item_id and evidence")
-        try:
-            actual_item_id = int(payload.get("item_id"))
-        except (TypeError, ValueError):
-            actual_item_id = None
-        if actual_item_id != item_id:
-            issues.append(f"partial {key} item ID mismatch")
-        lines = payload.get("evidence")
-        if not isinstance(lines, list) or not lines or not all(
+    bundle_payload = evidence.get("partial_bundle_evidence")
+    if not isinstance(bundle_payload, dict):
+        issues.append("partial_bundle_evidence must be an object")
+    else:
+        if set(bundle_payload) != {"evidence"}:
+            issues.append("partial_bundle_evidence must contain exactly evidence")
+        lines = bundle_payload.get("evidence")
+        if not isinstance(lines, list) or not all(
             isinstance(line, str) and line.strip() for line in lines
         ):
-            issues.append(f"partial {key} evidence must be a non-empty string list")
+            issues.append("partial_bundle_evidence.evidence must be a string list")
 
     expected_candidates = {
         str(candidate.get("label")): int(candidate.get("item_id"))
@@ -206,11 +185,16 @@ def validate_adaptive_item_evidence(evidence, case_view):
         if actual_candidate_id != candidate_id:
             issues.append(f"candidate {label} item ID mismatch")
         lines = payload.get("evidence")
-        if not isinstance(lines, list) or not lines or not all(
+        if not isinstance(lines, list) or not all(
             isinstance(line, str) and line.strip() for line in lines
         ):
-            issues.append(f"candidate {label} evidence must be a non-empty string list")
+            issues.append(f"candidate {label} evidence must be a string list")
     return issues
+
+
+def validate_adaptive_item_evidence(evidence, case_view):
+    """Backward-compatible alias for callers using the previous validator name."""
+    return validate_adaptive_bundle_evidence(evidence, case_view)
 
 
 async def generate_code_evidence_once(
@@ -232,7 +216,7 @@ async def generate_code_evidence_once(
         conf,
         initial_prompt,
         "code_generation_max_output_tokens",
-        int(conf.get("code_max_output_tokens", conf.get("sem_stage1_max_output_tokens", 16000))),
+        int(conf.get("code_max_output_tokens", 16000)),
         "code evidence generation",
     )
     code = extract_python_code(raw)
@@ -255,7 +239,7 @@ async def generate_code_evidence_once(
     if accepted is None:
         validation_issues.append("execution failed or evidence JSON was missing")
     else:
-        validation_issues = validate_adaptive_item_evidence(accepted, case_view)
+        validation_issues = validate_adaptive_bundle_evidence(accepted, case_view)
     if validation_issues:
         accepted = None
     summary = _compact_exec_context(result)
@@ -280,10 +264,10 @@ def build_code_generation_inputs(sample, conf):
     workspace = prepare_workspace(conf, config_prefix=CONFIG_PREFIX)
     source_manifest = build_source_manifest(
         workspace,
-        str(conf.get("code_current_bundle_train_context_policy", conf.get("sem_current_bundle_train_context_policy", "allow"))),
+        str(conf.get("code_current_bundle_train_context_policy", "allow")),
     )
     decision_case = build_decision_case(sample, conf)
-    evidence_output_file = f"output/adaptive_item_evidence_bundle{sample['bundle_id']}.json"
+    evidence_output_file = f"output/adaptive_bundle_evidence_bundle{sample['bundle_id']}.json"
     prompt = code_generation_prompt(
         case_view,
         source_manifest,
@@ -363,11 +347,11 @@ async def run_code_agent(
         "code_stage1_status": "accepted" if evidence is not None else "failed",
     }
     if evidence is None:
-        failure = "ERR_CODE: Stage 1 did not produce accepted adaptive item evidence"
+        failure = "ERR_CODE: Stage 1 did not produce accepted adaptive bundle evidence"
         print(f"  [Bundle {sample['bundle_id']}] Stage 2 skipped: {failure}")
         return row, "ERR_CODE", failure
 
-    print(f"  [Bundle {sample['bundle_id']}] Adaptive item evidence generation completed.")
+    print(f"  [Bundle {sample['bundle_id']}] Adaptive bundle evidence generation completed.")
 
     p_prompt = decision_prompt(decision_case, evidence)
     if is_first_sample and debug_callback:
@@ -378,7 +362,7 @@ async def run_code_agent(
         conf,
         p_prompt,
         "code_prediction_max_output_tokens",
-        int(conf.get("sem_prediction_max_output_tokens", 300)),
+        300,
         "code final prediction",
     )
     prediction, prediction_json = _parse_prediction(p_raw, prediction_parser, labels)

@@ -52,9 +52,6 @@ def _build_code_generation_client(conf):
         [
             "code_generation_api_key_env",
             "code_api_key_env",
-            "sem_evidence_api_key_env",
-            "sem_stage1_api_key_env",
-            "sem_code_api_key_env",
         ],
         default_api_key_envs_for_provider(provider),
     )
@@ -157,10 +154,10 @@ async def _run(args):
             issues = result.get("validation_issues", [])
             if issues:
                 print(">>> Validation issues: " + " | ".join(str(issue) for issue in issues))
-            print(">>> Stage 1 FAILED: generated code did not produce valid adaptive item evidence.")
+            print(">>> Stage 1 FAILED: generated code did not produce valid adaptive bundle evidence.")
         else:
             succeeded += 1
-            print(">>> Stage 1 OK: generated code executed and produced valid adaptive item evidence.")
+            print(">>> Stage 1 OK: generated code executed and produced valid adaptive bundle evidence.")
 
     print(f">>> Summary: {succeeded} succeeded, {failed} failed, {len(selected)} total")
     return 1 if failed else 0
