@@ -17,7 +17,7 @@ from .common import (
     extract_python_code,
     parse_json_from_text,
 )
-from .prompts import code_generation_prompt, decision_prompt
+from .prompts import MAX_EVIDENCE_ITEMS, code_generation_prompt, decision_prompt
 from .workspace import (
     build_source_manifest,
     execute_generated_code,
@@ -151,6 +151,10 @@ def validate_adaptive_bundle_evidence(evidence, case_view):
             isinstance(line, str) and line.strip() for line in lines
         ):
             issues.append("partial_bundle_evidence.evidence must be a string list")
+        elif len(lines) > MAX_EVIDENCE_ITEMS:
+            issues.append(
+                f"partial_bundle_evidence.evidence must contain at most {MAX_EVIDENCE_ITEMS} items"
+            )
 
     expected_candidates = {
         str(candidate.get("label")): int(candidate.get("item_id"))
@@ -189,6 +193,10 @@ def validate_adaptive_bundle_evidence(evidence, case_view):
             isinstance(line, str) and line.strip() for line in lines
         ):
             issues.append(f"candidate {label} evidence must be a string list")
+        elif len(lines) > MAX_EVIDENCE_ITEMS:
+            issues.append(
+                f"candidate {label} evidence must contain at most {MAX_EVIDENCE_ITEMS} items"
+            )
     return issues
 
 

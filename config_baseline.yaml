@@ -3,7 +3,7 @@
 # ============================================================
 
 # Dataset
-dataset: spotify                  # pog | pog_dense | spotify | spotify_sparse
+dataset: pog                  # pog | pog_dense | spotify | spotify_sparse
 data_path: ./datasets
 
 # Evaluation
@@ -15,16 +15,16 @@ shuffle_seed: 41
 
 # Default LLM fallback
 llm_provider: openai          # gemini | openai
-model: gpt-4.1-mini
+model: gpt-5-mini
 temperature: 0.0
 openai_send_temperature: false
 openai_reasoning_effort: ""
 
 # Baseline prediction stage
 baseline_prediction_provider: openai
-baseline_prediction_model: gpt-4.1-mini
+baseline_prediction_model: gpt-5-mini
 baseline_prediction_api_key_env: "DMLAB_KEY"
-baseline_prediction_max_output_tokens: 200
+baseline_prediction_max_output_tokens: 1000
 
 # Retry and concurrency
 max_retries: 5

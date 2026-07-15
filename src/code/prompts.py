@@ -3,6 +3,9 @@
 from .common import candidate_labels, pretty_json, task_semantics
 
 
+MAX_EVIDENCE_ITEMS = 5
+
+
 def _unified_case_context(case_view, semantic_case=None):
     semantic_case = semantic_case or {}
     partial_text = {
@@ -37,40 +40,36 @@ def _unified_case_context(case_view, semantic_case=None):
     return unified
 
 
-def _dataset_concept_guidance(dataset):
+def _dataset_intent_strategy_example(dataset):
     name = str(dataset or "").lower()
     if "spotify" in name:
         return (
-            "Spotify-specific conceptual guidance (not a template or prescribed strategy):\n"
-            "- A playlist intent may be organized by artist, genre, era, mood, theme, listening "
-            "context, or a combination inferred from the partial tracks.\n"
-            "- Potential source relations include track -> playlists -> co-occurring tracks, track "
-            "-> users -> other tracks, and other feasible multi-hop relations exposed by the listed "
-            "sources.\n"
-            "Decide for the current partial playlist itself. Do not assume that any listed intent "
-            "dimension or relation is appropriate."
+            "Minimal example of Partial Items -> Intent -> Strategy:\n\n"
+            "Partial Items:\n"
+            "Several upbeat synth-pop tracks with retro production and a night-driving mood.\n\n"
+            "Intent:\n"
+            "\"An energetic retro synth-pop playlist for nighttime driving.\"\n\n"
+            "Strategy:\n"
+            "Use the inferred era, genre, energy, and listening context to design a multi-step retrieval "
+            "strategy. Retrieve source-grounded contexts that express those properties, identify recurring "
+            "intent-relevant track patterns, and link every candidate to the same patterns while retaining "
+            "the five most semantically relevant records."
         )
     return (
-        "Illustrative POG example of an intent-specific multi-step strategy:\n\n"
-        "Suppose the partial items describe a lightweight shirt, relaxed shorts, and breathable casual "
-        "shoes. A plausible intent is \"A lightweight summer casual outfit.\"\n\n"
-        "Translate that intent into retrieval targets such as lightweight materials, short silhouettes, "
-        "summer use, casual style, and complementary category roles. Then use one coherent chain:\n\n"
-        "1. Retrieve direct containing outfits for each partial item.\n"
-        "2. Independently retrieve description- and image-nearest items, retain category-consistent "
-        "neighbors with actual train-bundle support, and use them as semantic anchors for sparse partial "
-        "items.\n"
-        "3. Traverse both direct items and semantic anchors to their containing outfits, then retrieve "
-        "co-occurring items, titles, and categories.\n"
-        "4. Identify intent-specific patterns recurring across the combined outfit neighborhoods.\n"
-        "5. Apply the same candidate -> semantic anchors -> containing outfits -> contextual metadata "
-        "chain to every candidate and report concrete records, without scoring or selecting candidates.\n\n"
-        "Direct and embedding-bridged retrieval are internal steps of one strategy, not separate fallback "
-        "strategies. Neighbor IDs or similarity values alone are not final evidence; report the retrieved "
-        "item metadata and outfit records.\n\n"
-        "This example illustrates how to operationalize an inferred intent. Do not default to a "
-        "seasonal intent unless the current partial items support it. Infer the appropriate intent "
-        "and relation chain for the current instance."
+        "Minimal example of Partial Items -> Intent -> Strategy:\n\n"
+        "Partial Items:\n"
+        "A waterproof shell jacket, flexible utility pants, and trail shoes.\n\n"
+        "Intent:\n"
+        "\"A functional, weather-ready outdoor outfit designed for mobility.\"\n\n"
+        "Strategy:\n"
+        "Use the intent-specific properties of weather protection, mobility, and outdoor use to design a "
+        "multi-step evidence-retrieval strategy. Retrieve source-grounded contexts that demonstrate those "
+        "properties, identify the most relevant recurring patterns, and connect every candidate to the same "
+        "intent-specific patterns. Retain at most five records by semantic relevance, not by item ID or "
+        "retrieval order.\n\n"
+        "This example demonstrates only the transformation from partial items to intent to strategy. For "
+        "the current bundle, infer new characteristics and design a new strategy rather than reusing the "
+        "outdoor attributes or steps above."
     )
 
 
@@ -91,7 +90,7 @@ def _schema_text(case_view):
         '  "intent": "one concise sentence describing the inferred partial-bundle intent",\n'
         '  "strategy": {\n'
         '    "name": "short instance-specific retrieval strategy name",\n'
-        '    "description": "the source relation, retrieval operation, and intent-specific distinction targeted"\n'
+        '    "description": "the intent-specific evidence-retrieval strategy implemented by the code"\n'
         "  },\n"
         '  "partial_bundle_evidence": {\n'
         '    "evidence": ["source: concrete records -> shared partial-bundle contextual pattern"]\n'
@@ -110,9 +109,10 @@ def _code_skeleton_text():
         "def load_sources():\n"
         "    <load the listed sources needed by the selected strategy>\n\n"
         "def retrieve_partial_bundle_evidence(partial_items, sources):\n"
-        "    <return a list of source-grounded evidence strings for the partial bundle as a whole>\n\n"
-        "def retrieve_candidate_evidence(candidate, partial_items, sources):\n"
-        "    <apply the same fixed strategy and return this candidate's evidence strings>\n\n"
+        "    <return at most five source-grounded evidence strings for the partial bundle as a whole>\n\n"
+        "def retrieve_candidate_evidence(candidate, partial_items, partial_bundle_evidence, sources):\n"
+        "    <use the retrieved partial-bundle evidence as fixed context and return at most five concrete "
+        "item or bundle records explaining how this candidate relates to that context>\n\n"
         "def main():\n"
         "    sources = load_sources()\n"
         "    partial_bundle_evidence = retrieve_partial_bundle_evidence(PARTIAL_ITEMS, sources)\n"
@@ -120,7 +120,9 @@ def _code_skeleton_text():
         "    for candidate in CANDIDATES:\n"
         "        candidate_evidence[candidate[\"label\"]] = {\n"
         "            \"item_id\": candidate[\"item_id\"],\n"
-        "            \"evidence\": retrieve_candidate_evidence(candidate, PARTIAL_ITEMS, sources),\n"
+        "            \"evidence\": retrieve_candidate_evidence(\n"
+        "                candidate, PARTIAL_ITEMS, partial_bundle_evidence, sources\n"
+        "            ),\n"
         "        }\n"
         "    <write INTENT, STRATEGY, partial_bundle_evidence, and candidate_evidence as required JSON>\n"
     )
@@ -141,29 +143,33 @@ def code_generation_prompt(
         f"{task_semantics(case_view.get('dataset'))}\n\n"
         "Problem instance:\n"
         f"{pretty_json(unified_case)}\n\n"
-        "The central task is to identify the distinctive characteristics of the current partial bundle "
-        "and design an evidence-retrieval strategy specifically tailored to those characteristics, so "
-        "that a separate Prediction Agent can identify which candidate best completes the bundle.\n\n"
-        "Do not use a generic retrieval strategy that would remain unchanged for a partial bundle with "
-        "a different intent.\n\n"
-        "Infer intent exclusively from the partial items. Do not use candidate items to choose, revise, "
-        "or broaden the intent. Keep the intent to one concise sentence.\n\n"
-        "Choose exactly one strategy after considering the inferred intent and the feasible relations in "
-        "the available sources. Fix that strategy before evaluating candidates. The strategy description "
-        "must state the source relation, retrieval operation, and intent-specific distinction it targets. "
-        "Do not produce or implement a fallback strategy.\n\n"
-        f"{_dataset_concept_guidance(case_view.get('dataset'))}\n\n"
-        "Retrieve source-grounded evidence for the partial bundle as a whole. This evidence should expose "
-        "shared external context across the partial items rather than repeat their input text or create a "
-        "separate evidence block for every partial item.\n\n"
-        "Then apply the one fixed strategy consistently to every candidate. Candidate evidence may describe "
-        "a concrete source-grounded relationship between that candidate and the complete partial bundle "
-        "context. Do not assign compatibility scores, rank candidates, or make the final prediction.\n\n"
+        "Before writing code, inspect only the partial items and infer one concise intent describing the "
+        "bundle they are trying to form. Do not use the candidates to infer or revise the intent.\n\n"
+        "Based on that inferred intent, design exactly one evidence-retrieval code strategy for this specific "
+        "bundle-completion task. The strategy must be capable of retrieving source-grounded evidence that "
+        "reflects the distinctive characteristics expressed by the intent. Choose the sources, relations, "
+        "and retrieval operations yourself from the listed data sources. It must be an instance-specific "
+        "multi-step strategy in which the steps work together to capture the characteristics of this bundle, "
+        "rather than a single generic lookup that would be unchanged for another bundle. Do not implement "
+        "a fallback strategy.\n\n"
+        f"{_dataset_intent_strategy_example(case_view.get('dataset'))}\n\n"
+        "Implement the strategy to retrieve evidence for the partial bundle as a whole, then apply the same "
+        "fixed strategy to every candidate. Do not score, rank, select, or predict candidates.\n\n"
+        "Evidence is not a description or score of the target item itself. It must be a concrete "
+        "source-grounded item or bundle record that explains how the target item relates to an "
+        "intent-specific completion pattern established from the current partial bundle.\n\n"
         "Final evidence must report concrete external records or contextual patterns retrieved from the "
         "listed sources. When records are items, report their available text or title rather than only item "
         "IDs. Item IDs may be used internally for lookup. If the selected strategy retrieves no evidence "
         "for a bundle or candidate, emit an empty evidence list instead of inventing evidence or writing a "
         "synthetic placeholder.\n\n"
+        f"Every evidence array must contain between zero and {MAX_EVIDENCE_ITEMS} strings. The generated "
+        "program may retrieve a broader context internally, but before writing JSON it must filter, "
+        "deduplicate, and retain only the records most semantically relevant to the inferred intent and "
+        "partial-bundle context. Do not select evidence merely by item ID, bundle ID, source order, or the "
+        "first records encountered. Candidate evidence must additionally provide a positive connection from "
+        "that candidate to the partial context through the selected relation chain. Selecting evidence "
+        "records is not candidate scoring: do not rank or select candidates.\n\n"
         "Use the following high-level program skeleton. Replace every angle-bracket placeholder and "
         "generate working implementations. Do not leave placeholders, ellipses, pass statements, TODOs, "
         "pseudocode, or undefined helper functions. You may add strategy-specific helpers, but do not add "
@@ -181,7 +187,7 @@ def code_generation_prompt(
     )
 
 
-def _short_evidence_lines(values, max_items=5, max_chars=900):
+def _short_evidence_lines(values, max_items=MAX_EVIDENCE_ITEMS, max_chars=900):
     if not isinstance(values, list):
         values = []
     lines = []
@@ -238,16 +244,18 @@ def decision_prompt(decision_case, evidence):
         block = [f"{label}. {candidate.get('text', '')}"]
         lines = _candidate_item_evidence(evidence, label)
         if lines:
-            block.append("Evidence: " + " | ".join(lines))
+            block.append("Evidence:\n" + "\n".join(f"- {line}" for line in lines))
         option_blocks.append("\n".join(block))
 
     context_lines = _intent_and_strategy_lines(evidence)
     bundle_lines = _bundle_evidence(evidence)
     if bundle_lines:
-        context_lines.append("Partial-bundle evidence: " + " | ".join(bundle_lines))
-    context_section = "\n".join(context_lines)
+        context_lines.append(
+            "Partial-bundle evidence:\n" + "\n".join(f"- {line}" for line in bundle_lines)
+        )
+    context_section = "\n\n".join(context_lines)
     if context_section:
-        context_section += "\n"
+        context_section += "\n\n"
 
     return (
         f"You are a helpful and honest assistant. The following is a multiple choice question about {task_name}. "
@@ -255,9 +263,9 @@ def decision_prompt(decision_case, evidence):
         "Only provide one option letter, without explanation or option content.\n"
         f"Question: Given the partial {bundle_name} below, which candidate {item_name} should be included into this {bundle_name}?\n"
         f"Partial {bundle_name}:\n"
-        f"{chr(10).join(partial_blocks)}\n"
+        f"{chr(10).join(partial_blocks)}\n\n"
         f"{context_section}"
-        f"Options:\n{chr(10).join(option_blocks)}\n"
+        f"Options:\n\n{(chr(10) * 2).join(option_blocks)}\n\n"
         'Your answer must be a single letter (for example, "A" or "B").\n'
         "Choice:"
     )

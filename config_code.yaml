@@ -3,7 +3,7 @@
 # ============================================================
 
 # Dataset
-dataset: pog_dense        # pog | pog_dense | spotify | spotify_sparse
+dataset: pog_dense       # pog | pog_dense | spotify | spotify_sparse
 data_path: ./datasets
 
 # Evaluation
@@ -30,11 +30,11 @@ code_generation_max_output_tokens: 16000
 code_prediction_provider: openai
 code_prediction_model: gpt-5-mini
 code_prediction_api_key_env: "DMLAB_KEY"
-code_prediction_max_output_tokens: 300
+code_prediction_max_output_tokens: 1000
 
 # Workspace and generated-code safety
 code_workspace_root: ./agent_workspaces
-code_code_timeout_seconds: 60
+code_code_timeout_seconds: 30
 code_code_max_stdout_chars: 24000
 code_code_max_stderr_chars: 10000
 code_enable_code_guard: true
