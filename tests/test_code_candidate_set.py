@@ -150,7 +150,12 @@ class CandidateSetEvidenceTests(unittest.TestCase):
         self.assertIn("weather protection, mobility, and outdoor use", generation)
         self.assertIn("rather than reusing the outdoor attributes or steps above", generation)
         self.assertIn("partial bundle as a whole", generation)
+        self.assertIn("derive a reusable completion pattern", generation)
         self.assertIn("apply the same fixed strategy to every candidate", generation)
+        self.assertIn("connects it to both the actual partial items and the derived completion pattern", generation)
+        self.assertIn("direct or may use a source-grounded multi-step relation", generation)
+        self.assertIn("must consume the actual partial-bundle context", generation)
+        self.assertIn("independently recreating search criteria is insufficient", generation)
         self.assertIn("Do not score, rank, select, or predict candidates", generation)
         self.assertIn("Evidence is not a description or score of the target item itself", generation)
         self.assertIn("a concrete source-grounded item or bundle record", generation)
@@ -168,18 +173,21 @@ class CandidateSetEvidenceTests(unittest.TestCase):
         self.assertIn("between zero and 5 strings", generation)
         self.assertIn("most semantically relevant to the inferred intent", generation)
         self.assertIn("Do not select evidence merely by item ID, bundle ID, source order", generation)
-        self.assertIn("retrieve_partial_bundle_evidence(partial_items, sources)", generation)
+        self.assertIn("retrieve_partial_bundle_context(partial_items, sources)", generation)
         self.assertIn(
-            "retrieve_candidate_evidence(candidate, partial_items, partial_bundle_evidence, sources)",
+            "retrieve_candidate_evidence(candidate, partial_items, partial_bundle_context, sources)",
             generation,
         )
-        self.assertIn("use the retrieved partial-bundle evidence as fixed context", generation)
+        self.assertIn("actually use partial_bundle_context", generation)
+        self.assertIn("connect this candidate to the actual partial items", generation)
+        self.assertIn("demonstrate the derived completion_pattern", generation)
         self.assertIn(
-            "candidate, PARTIAL_ITEMS, partial_bundle_evidence, sources",
+            "candidate, PARTIAL_ITEMS, partial_bundle_context, sources",
             generation,
         )
+        self.assertIn('partial_bundle_context["evidence"]', generation)
+        self.assertIn("completion_pattern is internal", generation)
         self.assertNotIn("derive_completion_patterns(partial_items, sources)", generation)
-        self.assertNotIn("bundle_context", generation)
         self.assertIn("read at least one listed source at runtime", generation)
         self.assertIn('"intent":', generation)
         self.assertIn('"strategy":', generation)
