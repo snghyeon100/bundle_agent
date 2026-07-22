@@ -76,7 +76,7 @@ sem_allowed_files:
   - "{dataset}_LightGCN_bi_feature.pt"
 
 # Retry and concurrency
-max_retries: 5
+max_retries: 0
 retry_wait_seconds: 30
 max_concurrent: 1
 output_dir: ./results

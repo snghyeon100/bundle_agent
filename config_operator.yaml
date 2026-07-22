@@ -1,0 +1,46 @@
+# Rank-free validation-induced retrieval operator MVP
+
+dataset: pog_dense       # pog | pog_dense | spotify | spotify_sparse
+data_path: ./datasets
+
+# Candidate construction for validation discovery
+num_cans: 10
+num_token: 5
+toy_eval: -1
+seed: 45
+shuffle_seed: 41
+
+# One LLM is sufficient for operator induction and clustering
+llm_provider: openai
+model: gpt-5-mini
+temperature: 0.0
+openai_send_temperature: false
+openai_reasoning_effort: ""
+code_generation_provider: openai #gemini
+code_generation_model: gpt-5-mini #gemini-3-flash-preview
+code_generation_api_key_env: "DMLAB_KEY"
+operator_max_output_tokens: 12000
+
+# Rank-free operator MVP
+operator_discovery_count: 5
+operator_discovery_seed: 42
+operator_induction_count: 4       # exact number of raw operators generated per validation sample
+operator_prompt_text_only: true   # IDs/metadata stay in artifacts but are hidden from the LLM prompt
+operator_library_min_size: 6
+operator_library_max_size: 10
+
+# Existing source environment; discovery reads bi_valid_*.txt for cases
+code_workspace_root: ./agent_workspaces
+code_current_bundle_train_context_policy: allow
+code_allowed_files:
+  - count.json
+  - item_info.json
+  - bi_train.txt
+  - ui_full.txt
+  - content_feature.pt
+  - description_feature.pt
+  - item_cf_feature.pt
+  - "{dataset}_LightGCN_bi_feature.pt"
+
+max_retries: 0
+retry_wait_seconds: 30

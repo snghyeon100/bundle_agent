@@ -21,6 +21,7 @@ agent_workspaces/
 logs/**
 scripts/**
 analysis/**
+tests/outputs/**
 # IDE and OS files
 .vscode/
 .idea/

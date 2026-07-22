@@ -28,9 +28,12 @@ def pairs2csr(pairs, shape):
 
 
 class BundleZeroShotDataset:
-    def __init__(self, conf):
+    def __init__(self, conf, split="test"):
         self.path = conf["data_path"]
         self.name = conf["dataset"]
+        self.split = str(split).strip().lower()
+        if self.split not in {"valid", "test"}:
+            raise ValueError(f"Unsupported split: {split}. Expected 'valid' or 'test'.")
         self.num_cans = int(conf["num_cans"])
         self.toy_eval = int(conf["toy_eval"])
         self.num_token = int(conf["num_token"])
@@ -47,11 +50,17 @@ class BundleZeroShotDataset:
         with open(info_path, "r", encoding="utf-8") as f:
             self.item_info = json.load(f)
 
-        input_path = os.path.join(self.path, self.name, "bi_test_input.txt")
-        gt_path = os.path.join(self.path, self.name, "bi_test_gt.txt")
+        input_path = os.path.join(self.path, self.name, f"bi_{self.split}_input.txt")
+        gt_path = os.path.join(self.path, self.name, f"bi_{self.split}_gt.txt")
         self.b_i_pairs_i = list2pairs(input_path)
         self.b_i_pairs_gt = list2pairs(gt_path)
-        np.random.shuffle(self.b_i_pairs_gt)
+        if self.split == "valid":
+            # Operator discovery must be reproducible even when validation is loaded
+            # more than once in the same process. Keep the legacy test ordering path.
+            split_rng = np.random.default_rng(self.seed)
+            split_rng.shuffle(self.b_i_pairs_gt)
+        else:
+            np.random.shuffle(self.b_i_pairs_gt)
 
         shape = (self.num_bundles, self.num_items)
         self.b_i_graph_i = pairs2csr(self.b_i_pairs_i, shape)
@@ -76,6 +85,25 @@ class BundleZeroShotDataset:
                 parts.append(info["album_name"])
             return " - ".join(parts) if parts else f"Track {item_id_str}"
         return f"Item {item_id_str}"
+
+    def get_labeled_samples(self):
+        """Return partial items and GT only, without constructing negative candidates."""
+        samples = []
+        for bundle_id, true_item_id in self.b_i_pairs_gt:
+            input_row = self.b_i_graph_i[bundle_id].toarray().squeeze()
+            input_rng = np.random.default_rng(int(bundle_id) + self.shuffle_seed)
+            input_indices = np.argwhere(input_row > 0).reshape(-1)
+            input_rng.shuffle(input_indices)
+            if self.num_token > 0 and len(input_indices) > self.num_token:
+                input_indices = input_indices[: self.num_token]
+            samples.append(
+                {
+                    "bundle_id": int(bundle_id),
+                    "true_indice": int(true_item_id),
+                    "input_indices": input_indices.tolist(),
+                }
+            )
+        return samples
 
     def get_eval_samples(self):
         samples = []

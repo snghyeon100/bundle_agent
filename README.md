@@ -28,15 +28,42 @@ Resume a partial run with:
 python src/main.py --config config.yaml --resume path\to\partial.csv
 ```
 
-Run only Simple Generate-Evaluate-Decide Stage 1 with the real configured API:
+The default `data_path` is `./datasets`. Dataset files, generated workspaces, and result files are local artifacts ignored by Git.
 
-```powershell
-python tests\run_simple_signal_stage1.py --config config.yaml --sample_idx 0 --limit 1 --debug
+## Rank-free operator MVP
+
+The first A2Flow-lite slice is implemented separately from ranking and reflection:
+
+```text
+existing bi_valid_input.txt + bi_valid_gt.txt
+-> per-sample prompt containing only partial_items + ground_truth
+-> label-guided atomic operator induction (one LLM call per sample)
+-> operator_pool.json
+-> one functional clustering pass
+-> dataset-specific operator_library.json
 ```
 
-This calls only the code-generation client, executes and validates the generated code, and performs configured code repair when necessary. It does not call the Sufficiency Evaluator or Decision Agent. The complete trace is saved under `analysis/simple_signal_stage1/` by default.
+Step 1 extracts only raw operators from validation samples:
 
-The default `data_path` is `./datasets`. Dataset files, generated workspaces, and result files are local artifacts ignored by Git.
+```powershell
+python tests/test_operator_induction.py --config config_operator.yaml
+```
+
+Results are saved to `tests/outputs/operators/<dataset>_<timestamp>/`. The folder contains the flat `operator_pool.json`, one combined `operators_by_sample.json`, and one compact JSON per sample under `samples/` with `input_items`, `gt_item`, and `operators`.
+
+Step 2 clusters the most recent operator pool for the configured dataset:
+
+```powershell
+python tests/test_operator_clustering.py --config config_operator.yaml
+```
+
+An explicit pool can also be supplied:
+
+```powershell
+python tests/test_operator_clustering.py --config config_operator.yaml --operator_pool path\to\operator_pool.json
+```
+
+Clustering results are saved to `tests/outputs/cluster/<dataset>_<timestamp>/`.
 
 ## Method configuration
 
