@@ -36,12 +36,16 @@ The first A2Flow-lite slice is implemented separately from ranking and reflectio
 
 ```text
 existing bi_valid_input.txt + bi_valid_gt.txt
--> per-sample prompt containing only partial_items + ground_truth
--> label-guided atomic operator induction (one LLM call per sample)
+-> per-sample prompt containing partial texts + candidate texts + GT label
+-> source-free semantic operator induction (one LLM call per sample)
 -> operator_pool.json
--> one functional clustering pass
--> dataset-specific operator_library.json
+-> one source-free semantic clustering pass
+-> dataset-specific semantic operator_library.json
+-> source grounding in a later phase
 ```
+
+Neither induction nor clustering receives a Source Capability Manifest. Sources and concrete
+implementation choices are deliberately deferred until after the semantic library is formed.
 
 Step 1 extracts only raw operators from validation samples:
 
@@ -49,7 +53,7 @@ Step 1 extracts only raw operators from validation samples:
 python tests/test_operator_induction.py --config config_operator.yaml
 ```
 
-Results are saved to `tests/outputs/operators/<dataset>_<timestamp>/`. The folder contains the flat `operator_pool.json`, one combined `operators_by_sample.json`, and one compact JSON per sample under `samples/` with `input_items`, `gt_item`, and `operators`.
+Results are saved to `tests/outputs/operators/<dataset>_<timestamp>/`. The folder contains the flat `operator_pool.json`, one combined `operators_by_sample.json`, and one compact JSON per sample under `samples/` with `input_items`, `candidate_items`, `gt_item`, and `operators`.
 
 Step 2 clusters the most recent operator pool for the configured dataset:
 

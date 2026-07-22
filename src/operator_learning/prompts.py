@@ -1,4 +1,4 @@
-"""LLM prompts for rank-free operator induction, clustering, and composition."""
+"""LLM prompts for source-free semantic induction and later workflow composition."""
 
 from code.common import pretty_json, task_semantics
 
@@ -13,60 +13,64 @@ def _semantic_case(case, text_only):
             for item in case.get("partial_items", [])
             if isinstance(item, dict) and str(item.get("text", "")).strip()
         ],
-        "ground_truth": str(case.get("ground_truth", {}).get("text", "")),
+        "candidates": {
+            str(candidate.get("label", "")): str(candidate.get("text", ""))
+            for candidate in case.get("candidates", [])
+            if isinstance(candidate, dict)
+            and str(candidate.get("label", "")).strip()
+            and str(candidate.get("text", "")).strip()
+        },
+        "ground_truth_candidate": str(case.get("ground_truth", {}).get("label", "")),
     }
 
 
-def induction_prompt(case, source_manifest, operator_count, *, text_only=True):
+def induction_prompt(case, operator_count, *, text_only=True):
     semantic_case = _semantic_case(case, text_only)
     return (
-        "You are the Operator Discovery Agent for a retrieval-based bundle-completion system.\n\n"
+        "You are the Semantic Operator Discovery Agent for a bundle-completion system.\n\n"
         f"{task_semantics(case.get('dataset'))}\n\n"
         "TASK DEFINITION\n"
         "A bundle is a set of items that belong together. At test time, the system receives an "
-        "incomplete bundle and a finite candidate set, and must select the candidate that best completes "
-        "the bundle. The system may retrieve evidence from the available data sources before a separate "
-        "prediction component makes the final choice.\n\n"
+        "incomplete partial bundle and a finite candidate set, and must select the candidate that best completes "
+        "the bundle. A later system will gather evidence before a separate prediction component makes "
+        "the final choice.\n\n"
         "This offline discovery step is different from test-time prediction. The validation case below "
-        "contains only the partial bundle and its held-out ground-truth completion. The ground truth is "
-        "shown solely as hindsight evidence for discovering useful retrieval behavior. It will not be "
-        "available when an operator is later used. No negative candidates are provided in this step.\n\n"
+        "contains the partial bundle, candidate texts, and the label of the ground-truth candidate. The "
+        "ground-truth label is shown solely as hindsight evidence for discovering useful retrieval "
+        "behavior. It will not be available when an operator is later used.\n\n"
         "OPERATOR DEFINITION\n"
-        "A retrieval operator is one reusable evidence-acquisition or evidence-transformation primitive "
-        "that can become a node inside a later multi-step workflow. At runtime, an operator may consume "
-        "the partial bundle, candidate items when relevant, intermediate evidence from an earlier node, "
-        "and one or more data sources. It must produce evidence or an intermediate signal that another "
-        "operator or the final predictor can use.\n\n"
+        "A semantic operator is one reusable evidence question or evidence-transformation primitive that "
+        "can become a node inside a later multi-step workflow. At runtime, it may consume the partial "
+        "bundle, candidate items when relevant, and intermediate evidence from an earlier node. It must "
+        "produce semantic evidence or an intermediate signal that another operator or the final predictor "
+        "can use.\n\n"
         "An operator is not a complete workflow, not a final candidate answer, and not a vague semantic "
-        "observation. It must specify one central retrieval or transformation principle precisely enough "
-        "for a later code-generation agent to implement. Supporting parsing or aggregation may be "
-        "described, but do not combine several independent retrieval ideas into one operator.\n\n"
+        "observation. It must specify one central comparison or transformation principle. Do not combine "
+        "several independent ideas into one operator. This phase is deliberately source-free: do not "
+        "choose ideas based on files, databases, embeddings, models, or other implementation resources. "
+        "Describe what evidence should be obtained, not which source will provide it. Source grounding "
+        "will happen only after the semantic library has been clustered.\n\n"
         "DISCOVERY OBJECTIVE\n"
-        "First infer the semantic intent of the partial bundle and analyze why the ground-truth item is a "
-        "valid completion. Use that hindsight relation to propose diverse and creative atomic operators. "
-        "Do not hard-code the current item titles, IDs, exact ground-truth identity, or a rule that works "
-        "only for this case. Generalize each insight into a reusable operation for other bundles with a "
-        "similar situation. Do not force the operators into a predefined taxonomy; let the case semantics "
-        "and useful retrieval structures determine them.\n\n"
-        "The operators must be genuinely different retrieval ideas, not renamed paraphrases. Do not "
+        "First infer the semantic intent of the partial bundle. Then compare the ground-truth candidate "
+        "with the alternatives and analyze what semantic evidence could distinguish the correct "
+        "completion from plausible but incorrect candidates. Use that hindsight contrast to propose "
+        "diverse and creative atomic operators. Do not merely explain why the GT is good, and do not "
+        "hard-code the current item titles, candidate labels, IDs, exact ground-truth identity, or a rule "
+        "that works only for this case. Generalize each insight into a reusable operation for other "
+        "bundles with a similar discriminative situation. Do not force the operators into a predefined "
+        "taxonomy; let the case semantics and useful retrieval structures determine them.\n\n"
+        "The operators must be genuinely different semantic ideas, not renamed paraphrases. Do not "
         "perform final completion selection or ranking.\n\n"
         f"Validation case:\n{pretty_json(semantic_case)}\n\n"
-        "The following source capability manifest describes the data currently available to the "
-        "system. Use it as practical grounding, but do not treat it as a closed list. A creative "
-        "operator may also propose a useful derived signal or an additional conceptual source that is "
-        "not currently available.\n\n"
-        f"Source capability manifest:\n{pretty_json(source_manifest)}\n\n"
         f"Return JSON only with exactly {int(operator_count)} operators:\n"
         "{\n"
         '  "operators": [\n'
         "    {\n"
         '      "name": "ConcisePascalCaseName",\n'
         '      "purpose": "the single reusable evidence objective",\n'
-        '      "anchor": "the runtime entity or observable condition that starts this operator",\n'
-        '      "inputs": ["runtime inputs required by this operator"],\n'
-        '      "sources": ["source name or additional source idea used to obtain evidence"],\n'
-        '      "relation_path": "how the operator traverses or connects entities and evidence",\n'
-        '      "operation": "one central retrieval, comparison, filtering, aggregation, or transformation principle",\n'
+        '      "anchor": "the semantic entity, role, relation, or contrast that starts this operator",\n'
+        '      "inputs": ["logical runtime inputs required by this operator"],\n'
+        '      "operation": "one central semantic comparison, filtering, aggregation, or transformation principle",\n'
         '      "output": "evidence or intermediate signal, never the final candidate answer",\n'
         '      "when_useful": "observable test-time condition indicating this operator should be used"\n'
         "    }\n"
@@ -78,12 +82,13 @@ def induction_prompt(case, source_manifest, operator_count, *, text_only=True):
 
 def clustering_prompt(raw_operators, dataset, min_operators, max_operators):
     return (
-        "You are building a middle-level retrieval operator library from validation-induced raw "
-        "operators. Cluster by functional equivalence, not merely by shared data source or wording.\n\n"
-        "Two operators may merge only when their retrieval objective, anchor, relation path, "
-        "computation/filtering principle, and output evidence type are functionally compatible. "
-        "Keep operators separate when any of those structural roles differ. Avoid abstractions such "
-        "as Analyze, Retrieve, Process, or Validate.\n\n"
+        "You are building a middle-level semantic operator library from validation-induced raw "
+        "operators. No source capability manifest is available in this phase. Cluster by semantic and "
+        "functional equivalence, never by presumed files, models, databases, or implementation methods.\n\n"
+        "Two operators may merge only when their evidence objective, semantic anchor, comparison or "
+        "transformation principle, and output evidence type are compatible. Keep operators separate "
+        "when those roles differ. Preserve useful semantic distinctions while removing paraphrases and "
+        "case-specific wording. Avoid empty abstractions such as Analyze, Retrieve, Process, or Validate.\n\n"
         f"Dataset: {dataset}\n"
         f"Raw operators:\n{pretty_json(raw_operators)}\n\n"
         f"Create between {int(min_operators)} and {int(max_operators)} refined operators when the raw "
@@ -100,12 +105,10 @@ def clustering_prompt(raw_operators, dataset, min_operators, max_operators):
         '  "operators": [\n'
         "    {\n"
         '      "name": "RefinedOperatorName",\n'
-        '      "purpose": "middle-level reusable retrieval objective",\n'
-        '      "anchor": "generalized retrieval anchor",\n'
+        '      "purpose": "middle-level reusable semantic evidence objective",\n'
+        '      "anchor": "generalized semantic anchor",\n'
         '      "inputs": ["required logical input"],\n'
-        '      "sources": ["allowed source name or source class"],\n'
-        '      "relation_path": "generalized relation path",\n'
-        '      "operation": "specific reusable computation or filtering principle",\n'
+        '      "operation": "specific reusable semantic comparison or transformation principle",\n'
         '      "output": "evidence type produced",\n'
         '      "when_useful": "observable applicability condition",\n'
         '      "derived_from": ["raw operator_id"]\n'
@@ -113,7 +116,8 @@ def clustering_prompt(raw_operators, dataset, min_operators, max_operators):
         "  ]\n"
         "}\n\n"
         "Every raw operator_id must belong to exactly one cluster. Each refined operator must match "
-        "exactly one cluster representative and preserve source-grounded executability."
+        "exactly one cluster representative. Do not add sources or implementation details; those will "
+        "be grounded in a separate post-clustering phase."
     )
 
 

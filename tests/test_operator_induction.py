@@ -30,7 +30,6 @@ from main import (
     stage_provider,
 )
 from operator_learning.pipeline import (
-    build_operator_source_manifest,
     induce_raw_operators,
     sample_validation_cases,
 )
@@ -70,7 +69,6 @@ async def _run(args):
     sample_count = int(args.sample_count or conf.get("operator_discovery_count", 5))
     operators_per_sample = int(conf.get("operator_induction_count", 4))
     samples = sample_validation_cases(conf, sample_count)
-    _, source_manifest = build_operator_source_manifest(conf)
     client, resolved = _build_client(conf)
 
     timestamp = time.strftime("%Y%m%d_%H%M%S")
@@ -85,7 +83,6 @@ async def _run(args):
         )
     )
     os.makedirs(output_dir, exist_ok=True)
-    _write_json(os.path.join(output_dir, "source_manifest.json"), source_manifest)
     _write_json(
         os.path.join(output_dir, "run.json"),
         {
@@ -94,6 +91,7 @@ async def _run(args):
             "validation_source": ["bi_valid_input.txt", "bi_valid_gt.txt"],
             "sample_count": sample_count,
             "operators_per_sample": operators_per_sample,
+            "source_manifest_used": False,
             "seed": int(conf.get("operator_discovery_seed", conf.get("seed", 45))),
             **resolved,
         },
@@ -124,7 +122,6 @@ async def _run(args):
     result = await induce_raw_operators(
         samples,
         conf,
-        source_manifest,
         call_text,
         trace_callback=save_trace,
     )
@@ -140,6 +137,7 @@ async def _run(args):
             "sample_id": case_id,
             "bundle_id": case["bundle_id"],
             "input_items": case["partial_items"],
+            "candidate_items": case["candidates"],
             "gt_item": case["ground_truth"],
             "operators": operators_by_case.get(case_id, []),
         }

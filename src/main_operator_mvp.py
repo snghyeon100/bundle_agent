@@ -59,7 +59,9 @@ async def _run(args):
         conf = yaml.safe_load(handle)
     set_seed(int(conf.get("seed", 45)))
     client, resolved = _build_client(conf)
-    _, source_manifest = build_operator_source_manifest(conf)
+    source_manifest = None
+    if args.phase in {"compose", "all"}:
+        _, source_manifest = build_operator_source_manifest(conf)
 
     async def call_text(prompt, step_name):
         return await generate_content_with_retry(
@@ -90,7 +92,7 @@ async def _run(args):
         count = args.discovery_count or int(conf.get("operator_discovery_count", 5))
         samples = sample_validation_cases(conf, count)
         print(f">>> Inducing operators from {len(samples)} validation samples")
-        discovery = await discover_operator_library(samples, conf, source_manifest, call_text)
+        discovery = await discover_operator_library(samples, conf, call_text)
         library = discovery["library"]
         print(
             f">>> Raw operators: {len(discovery['raw_operators'])} | "

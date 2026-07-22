@@ -22,14 +22,17 @@ code_generation_api_key_env: "DMLAB_KEY"
 operator_max_output_tokens: 12000
 
 # Rank-free operator MVP
-operator_discovery_count: 5
+operator_discovery_count: 10
 operator_discovery_seed: 42
-operator_induction_count: 4       # exact number of raw operators generated per validation sample
+operator_induction_count: 5       # exact number of raw operators generated per validation sample
 operator_prompt_text_only: true   # IDs/metadata stay in artifacts but are hidden from the LLM prompt
 operator_library_min_size: 6
 operator_library_max_size: 10
 
-# Existing source environment; discovery reads bi_valid_*.txt for cases
+# Source capabilities are excluded from induction and clustering. They are introduced
+# only in a later post-clustering grounding/composition phase.
+
+# Existing source environment for the later grounding/composition phase
 code_workspace_root: ./agent_workspaces
 code_current_bundle_train_context_policy: allow
 code_allowed_files:

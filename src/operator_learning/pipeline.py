@@ -11,6 +11,7 @@ from dataset import BundleZeroShotDataset
 
 from .prompts import clustering_prompt, composition_prompt, induction_prompt
 from .schemas import (
+    OPERATOR_FIELDS,
     normalize_library,
     validate_induction_result,
     validate_operator,
@@ -19,12 +20,22 @@ from .schemas import (
 )
 
 
+def _semantic_operator_view(operator, *, include_identity=False):
+    """Drop source/implementation fields before persistence or semantic clustering."""
+    if not isinstance(operator, dict):
+        return operator
+    fields = list(OPERATOR_FIELDS)
+    if include_identity:
+        fields.extend(("operator_id", "origin_case_id"))
+    return {field: operator[field] for field in fields if field in operator}
+
+
 def sample_validation_cases(conf, count, seed=None):
     """Draw deterministic discovery cases from existing bi_valid files, never test."""
     discovery_conf = dict(conf)
     discovery_conf["toy_eval"] = -1
     dataset = BundleZeroShotDataset(discovery_conf, split="valid")
-    samples = dataset.get_labeled_samples()
+    samples = dataset.get_eval_samples()
     requested = int(count)
     if requested < 1:
         raise ValueError("operator discovery count must be at least 1")
@@ -44,6 +55,11 @@ def build_discovery_case(sample, conf):
         item_info = json.load(handle)
     gt_item_id = int(sample["true_indice"])
     gt_profile = _item_profile(gt_item_id, item_info, conf["dataset"])
+    labels = [chr(ord("A") + index) for index in range(len(sample["candidate_indices"]))]
+    candidates = [
+        {"label": label, **_item_profile(item_id, item_info, conf["dataset"])}
+        for label, item_id in zip(labels, sample["candidate_indices"])
+    ]
     return {
         "case_id": f"bundle_{sample['bundle_id']}",
         "dataset": conf["dataset"],
@@ -52,7 +68,9 @@ def build_discovery_case(sample, conf):
             _item_profile(item_id, item_info, conf["dataset"])
             for item_id in sample["input_indices"]
         ],
+        "candidates": candidates,
         "ground_truth": {
+            "label": str(sample["true_option_char"]),
             "item_id": gt_item_id,
             "text": gt_profile.get("text", ""),
             "metadata": gt_profile.get("metadata", {}),
@@ -80,7 +98,6 @@ async def _request_json(call_text, prompt, step_name):
 async def induce_raw_operators(
     samples,
     conf,
-    source_manifest,
     call_text,
     *,
     operators_per_case=None,
@@ -99,7 +116,6 @@ async def induce_raw_operators(
         discovery_cases.append(case)
         prompt = induction_prompt(
             case,
-            source_manifest,
             per_case,
             text_only=bool(conf.get("operator_prompt_text_only", True)),
         )
@@ -127,7 +143,7 @@ async def induce_raw_operators(
             )
         case_operators = []
         for index, operator in enumerate(result["operators"], start=1):
-            enriched = dict(operator)
+            enriched = _semantic_operator_view(operator)
             enriched["operator_id"] = f"{case['case_id']}__op{index}"
             enriched["origin_case_id"] = case["case_id"]
             case_operators.append(enriched)
@@ -178,7 +194,11 @@ async def cluster_raw_operators(
     if minimum < 1 or maximum < minimum:
         raise ValueError("operator library size bounds are invalid")
 
-    c_prompt = clustering_prompt(raw_operators, conf["dataset"], minimum, maximum)
+    semantic_pool = [
+        _semantic_operator_view(operator, include_identity=True)
+        for operator in raw_operators
+    ]
+    c_prompt = clustering_prompt(semantic_pool, conf["dataset"], minimum, maximum)
     clustering_raw = await call_text(c_prompt, "functional operator clustering")
     clustering_result = parse_json_from_text(clustering_raw)
     library = normalize_library(clustering_result, conf["dataset"])
@@ -231,7 +251,6 @@ async def cluster_raw_operators(
 async def discover_operator_library(
     samples,
     conf,
-    source_manifest,
     call_text,
     *,
     operators_per_case=None,
@@ -242,7 +261,6 @@ async def discover_operator_library(
     induction = await induce_raw_operators(
         samples,
         conf,
-        source_manifest,
         call_text,
         operators_per_case=operators_per_case,
     )

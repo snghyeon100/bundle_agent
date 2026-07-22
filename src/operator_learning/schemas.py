@@ -1,4 +1,4 @@
-"""Deterministic schemas for the rank-free operator MVP."""
+"""Deterministic schemas for the rank-free semantic operator MVP."""
 
 from copy import deepcopy
 
@@ -8,8 +8,6 @@ OPERATOR_FIELDS = (
     "purpose",
     "anchor",
     "inputs",
-    "sources",
-    "relation_path",
     "operation",
     "output",
     "when_useful",
@@ -43,14 +41,13 @@ def validate_operator(operator, *, require_provenance=False):
         "name",
         "purpose",
         "anchor",
-        "relation_path",
         "operation",
         "output",
         "when_useful",
     ):
         if field in operator and not _non_empty_string(operator.get(field)):
             issues.append(f"operator.{field} must be a non-empty string")
-    for field in ("inputs", "sources"):
+    for field in ("inputs",):
         if field in operator and not _string_list(operator.get(field)):
             issues.append(f"operator.{field} must be a non-empty string list")
     if require_provenance and "derived_from" in operator and not _string_list(
@@ -81,8 +78,8 @@ def validate_operator_library(value):
     if not isinstance(value, dict):
         return ["operator library must be an object"]
     issues = []
-    if value.get("schema_version") != "retrieval_operator_library_v1":
-        issues.append("schema_version must be retrieval_operator_library_v1")
+    if value.get("schema_version") != "semantic_operator_library_v1":
+        issues.append("schema_version must be semantic_operator_library_v1")
     if not _non_empty_string(value.get("dataset")):
         issues.append("dataset must be a non-empty string")
     clusters = value.get("clusters")
@@ -123,12 +120,20 @@ def validate_operator_library(value):
 
 
 def normalize_library(value, dataset):
-    """Attach the local envelope while retaining only schema fields from the LLM result."""
+    """Attach the local envelope and remove source/implementation fields."""
     result = deepcopy(value) if isinstance(value, dict) else {}
-    result["schema_version"] = "retrieval_operator_library_v1"
+    result["schema_version"] = "semantic_operator_library_v1"
     result["dataset"] = str(dataset)
     result.setdefault("clusters", [])
     result.setdefault("operators", [])
+    if isinstance(result["operators"], list):
+        allowed = (*OPERATOR_FIELDS, "derived_from")
+        result["operators"] = [
+            {field: operator[field] for field in allowed if field in operator}
+            if isinstance(operator, dict)
+            else operator
+            for operator in result["operators"]
+        ]
     return result
 
 
