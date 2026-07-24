@@ -80,21 +80,6 @@ def validate_operator(
             "operator must be deployable without ground truth or the correct answer"
         )
 
-    normalized_output = _normalized_text(operator.get("output"))
-    if any(
-        marker in normalized_output
-        for marker in ("rank", "prediction", "candidatechoice", "finalanswer")
-    ):
-        issues.append(
-            "operator.output must describe an intermediate artifact, not a rank "
-            "or final prediction"
-        )
-    if any(
-        marker in normalized_output
-        for marker in ("score", "similarityvalue", "compatibilityvalue")
-    ):
-        issues.append("operator.output must not be a score-only artifact")
-
     if require_provenance and "derived_from" in operator and not _string_list(
         operator.get("derived_from")
     ):

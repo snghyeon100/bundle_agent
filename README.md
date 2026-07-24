@@ -150,8 +150,10 @@ The deterministic validator enforces:
 - the exact six-field schema;
 - non-empty textual fields;
 - valid and unique source IDs;
-- no ground-truth or correct-answer dependency;
-- no rank, prediction, final-choice, or score-like output.
+- no ground-truth or correct-answer dependency.
+
+Rank, prediction, final-choice, and score-only outputs remain prohibited by the
+induction prompt, but are not rejected by a brittle keyword-based validator.
 
 Run induction:
 
