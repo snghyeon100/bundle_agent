@@ -1,4 +1,4 @@
-"""Rank-free validation-induced operator discovery and workflow composition CLI.
+"""Source-aware compact operator discovery and workflow composition CLI.
 
 Examples:
     python src/main_operator_mvp.py --config config_operator.yaml --phase all
@@ -24,7 +24,7 @@ from main import (
     stage_provider,
 )
 from operator_learning.pipeline import (
-    build_operator_source_manifest,
+    build_operator_capability_manifest,
     compose_workflows,
     discover_operator_library,
     load_operator_library,
@@ -59,9 +59,7 @@ async def _run(args):
         conf = yaml.safe_load(handle)
     set_seed(int(conf.get("seed", 45)))
     client, resolved = _build_client(conf)
-    source_manifest = None
-    if args.phase in {"compose", "all"}:
-        _, source_manifest = build_operator_source_manifest(conf)
+    _, source_manifest, source_capabilities = build_operator_capability_manifest(conf)
 
     async def call_text(prompt, step_name):
         return await generate_content_with_retry(
@@ -92,7 +90,12 @@ async def _run(args):
         count = args.discovery_count or int(conf.get("operator_discovery_count", 5))
         samples = sample_validation_cases(conf, count)
         print(f">>> Inducing operators from {len(samples)} validation samples")
-        discovery = await discover_operator_library(samples, conf, call_text)
+        discovery = await discover_operator_library(
+            samples,
+            conf,
+            call_text,
+            source_capabilities=source_capabilities,
+        )
         library = discovery["library"]
         print(
             f">>> Raw operators: {len(discovery['raw_operators'])} | "
@@ -129,7 +132,7 @@ async def _run(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run rank-free retrieval operator MVP")
+    parser = argparse.ArgumentParser(description="Run compact operator learning MVP")
     parser.add_argument("--config", default="config_operator.yaml")
     parser.add_argument("--phase", choices=("discover", "compose", "all"), default="all")
     parser.add_argument("--library", default="")

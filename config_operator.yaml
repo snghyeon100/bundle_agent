@@ -12,27 +12,25 @@ shuffle_seed: 41
 
 # One LLM is sufficient for operator induction and clustering
 llm_provider: openai
-model: gpt-5-mini
+model: gpt-4.1-mini
 temperature: 0.0
 openai_send_temperature: false
-openai_reasoning_effort: ""
+openai_reasoning_effort: "low"
 code_generation_provider: openai #gemini
-code_generation_model: gpt-5-mini #gemini-3-flash-preview
+code_generation_model: gpt-4.1-mini #gemini-3-flash-preview
 code_generation_api_key_env: "DMLAB_KEY"
-operator_max_output_tokens: 12000
+operator_max_output_tokens: 15000
 
 # Rank-free operator MVP
 operator_discovery_count: 10
 operator_discovery_seed: 42
-operator_induction_count: 5       # exact number of raw operators generated per validation sample
+operator_induction_count: 4       # exact number of raw operators generated per validation sample
 operator_prompt_text_only: true   # IDs/metadata stay in artifacts but are hidden from the LLM prompt
 operator_library_min_size: 6
 operator_library_max_size: 10
 
-# Source capabilities are excluded from induction and clustering. They are introduced
-# only in a later post-clustering grounding/composition phase.
-
-# Existing source environment for the later grounding/composition phase
+# Source-aware compact operator induction. Concrete paths are hidden; the prompt receives
+# path-free entity/relation capabilities and the operations each source supports.
 code_workspace_root: ./agent_workspaces
 code_current_bundle_train_context_policy: allow
 code_allowed_files:

@@ -1,6 +1,7 @@
-"""Validation-induced retrieval operator learning and workflow composition."""
+"""Validation-induced compact operators and workflow composition."""
 
 from .pipeline import (
+    build_operator_capability_manifest,
     cluster_raw_operators,
     compose_workflows,
     discover_operator_library,
@@ -11,6 +12,7 @@ from .pipeline import (
 )
 
 __all__ = [
+    "build_operator_capability_manifest",
     "cluster_raw_operators",
     "compose_workflows",
     "discover_operator_library",

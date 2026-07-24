@@ -1,93 +1,285 @@
-# Bundle Agent
+# Bundle Agent: Compact Operator Learning MVP
 
-Training-free, source-grounded bundle completion with two code-generating methods:
+## Research objective
 
-- **Simple Generate-Evaluate-Decide**: generate and execute signal code, evaluate evidence sufficiency, refine once by default, and return a prediction-only decision.
-- **Progressive Signal Discovery**: establish broad source coverage, diagnose evidence gaps, and plan deeper investigations before decision.
+This project learns reusable operations for bundle completion.
 
-The configured default is Simple Generate-Evaluate-Decide. For each partial bundle and candidate set, it:
-
-1. builds a train-safe Source Capability Manifest;
-2. generates and executes Python signal code over ID-only case input;
-3. validates compact candidate-scoped Evidence JSON;
-4. evaluates whether the evidence is `SUFFICIENT`, requires `REFINE`, or is `INCONCLUSIVE`;
-5. passes deterministic item text, verified evidence, and the evaluation to a prediction-only Decision Agent.
-
-The canonical evidence-agent input contains the real `bundle_id`, partial item IDs, and candidate label/item-ID mappings. Item metadata and representative examples are retrieved from allowed sources and recorded with provenance. Ground truth, test GT files, predictions, hits, and result files are never exposed to generated code.
-
-## Run
-
-```powershell
-pip install -r requirements.txt
-python src/main.py --config config.yaml
-```
-
-Resume a partial run with:
-
-```powershell
-python src/main.py --config config.yaml --resume path\to\partial.csv
-```
-
-The default `data_path` is `./datasets`. Dataset files, generated workspaces, and result files are local artifacts ignored by Git.
-
-## Rank-free operator MVP
-
-The first A2Flow-lite slice is implemented separately from ranking and reflection:
+The central distinction is:
 
 ```text
-existing bi_valid_input.txt + bi_valid_gt.txt
--> per-sample prompt containing partial texts + candidate texts + GT label
--> source-free semantic operator induction (one LLM call per sample)
--> operator_pool.json
--> one source-free semantic clustering pass
--> dataset-specific semantic operator_library.json
--> source grounding in a later phase
+operator = one reusable input → transformation → output
+strategy = multiple operators connected for one prediction case
 ```
 
-Neither induction nor clustering receives a Source Capability Manifest. Sources and concrete
-implementation choices are deliberately deferred until after the semantic library is formed.
+Operator induction must therefore produce atomic transformations, not complete
+candidate-ranking pipelines. Workflow composition, code generation, execution,
+and rank-based reflection are separate downstream stages.
 
-Step 1 extracts only raw operators from validation samples:
+## Current pipeline
+
+```text
+validation cases with hindsight labels
+    ↓
+compact operator induction
+    ↓
+raw operator pool
+    ↓
+semantic clustering
+    ↓
+reusable operator library
+    ↓
+test-time workflow composition
+    ↓
+code generation and execution
+    ↓
+prediction
+```
+
+The current MVP implements induction, clustering, and workflow composition.
+Prediction-level operator evaluation and rank-based reflection are planned
+after the basic operator abstraction is validated.
+
+## Compact operator representation
+
+Every induced operator has exactly six fields:
+
+```json
+{
+  "name": "ContrastCandidateIntent",
+  "objective": "Expose candidate-specific semantic agreement and conflict.",
+  "input": "candidate metadata and a partial-bundle intent hypothesis",
+  "operation": "contrast each candidate's attributes against the inferred intent",
+  "output": "candidate-indexed semantic agreement and conflict evidence",
+  "sources": ["item_metadata"]
+}
+```
+
+The fields mean:
+
+- `name`: concise reusable operation name;
+- `objective`: why the transformation is useful;
+- `input`: one logical input artifact in concise natural language;
+- `operation`: one central semantic transformation;
+- `output`: one reusable intermediate artifact;
+- `sources`: capability IDs needed to execute the operation, or `[]`.
+
+The induction output deliberately omits:
+
+- fixed operator kinds;
+- nested type contracts;
+- anchors;
+- preconditions;
+- failure-signal lists;
+- applicability prose;
+- workflow order;
+- next-operator references.
+
+This keeps raw operators easy to inspect, compare, embed, and cluster.
+
+## No predefined type catalog
+
+`input` and `output` are concise natural-language artifact descriptions. The
+model is not given a fixed type ontology, and lexical equality is not required.
+
+A later workflow composer or code-generation agent must determine whether an
+operator output can satisfy another operator input. If descriptions differ but
+the underlying artifacts are compatible, the downstream agent may construct an
+explicit adapter.
+
+This is an experimental choice: the MVP tests whether semantic interfaces are
+sufficient before introducing a human-designed type system.
+
+## Source capabilities are not operators
+
+The source-capability manifest describes executable data access primitives,
+including:
+
+- item metadata;
+- bundle-item history;
+- user-item history;
+- content and description embeddings;
+- collaborative embeddings;
+- dataset statistics.
+
+An induced operator may list these capability IDs in `sources`, but a lookup
+alone is not considered a learned operator.
+
+```text
+source capability:
+    retrieve item embeddings
+
+induced operator:
+    transform bundle and candidate embeddings into candidate-specific
+    supporting and conflicting evidence
+```
+
+The distinction prevents the raw operator pool from becoming a renamed list of
+available files or APIs.
+
+## Offline stage 1: operator induction
+
+Induction samples labeled examples only from the validation split:
+
+- `bi_valid_input.txt`
+- `bi_valid_gt.txt`
+
+The test split is not used for operator discovery.
+
+For each sampled validation case, the model receives:
+
+- partial-bundle item descriptions;
+- a finite candidate set;
+- the ground-truth candidate as hindsight evidence;
+- the source-capability manifest.
+
+Ground truth is used only to discover what evidence would have been
+discriminative. It must never appear in an operator's deployable fields.
+
+The prompt requires each operator to:
+
+- describe one atomic transformation;
+- remain reusable across cases;
+- avoid product names, candidate labels, and item IDs;
+- avoid references to other generated operators or execution order;
+- produce an intermediate artifact rather than a final choice;
+- avoid rank, prediction, and score-only outputs;
+- use only available capability IDs in `sources`.
+
+The deterministic validator enforces:
+
+- the exact six-field schema;
+- non-empty textual fields;
+- valid and unique source IDs;
+- no ground-truth or correct-answer dependency;
+- no rank, prediction, final-choice, or score-like output.
+
+Run induction:
 
 ```powershell
-python tests/test_operator_induction.py --config config_operator.yaml
+.venv\Scripts\python.exe tests\test_operator_induction.py `
+  --config config_operator.yaml `
+  --sample_count 3
 ```
 
-Results are saved to `tests/outputs/operators/<dataset>_<timestamp>/`. The folder contains the flat `operator_pool.json`, one combined `operators_by_sample.json`, and one compact JSON per sample under `samples/` with `input_items`, `candidate_items`, `gt_item`, and `operators`.
+The run writes:
 
-Step 2 clusters the most recent operator pool for the configured dataset:
+```text
+tests/outputs/operators/<dataset>_<timestamp>/
+├── run.json
+├── source_capabilities.json
+├── validation_samples.json
+├── operator_pool.json
+├── operators_by_sample.json
+├── summary.json
+├── cases/
+│   └── <case_id>/
+│       ├── input.txt
+│       ├── output.txt
+│       ├── parsed_response.json
+│       ├── validation_issues.json
+│       ├── connection_diagnostics.json
+│       └── operators.json
+└── samples/
+    └── <case_id>.json
+```
+
+## Offline stage 2: semantic clustering
+
+Clustering operates on the saved raw operator pool. Operators are merged only
+when the following describe the same reusable transition:
+
+1. objective;
+2. input artifact;
+3. central operation;
+4. output artifact.
+
+Shared sources or similar names are not sufficient grounds for merging.
+
+Each refined operator keeps the same compact six-field representation and adds:
+
+```json
+{
+  "derived_from": ["bundle_20517__op3", "bundle_28141__op2"]
+}
+```
+
+Clusters additionally record their member IDs, representative operator, and
+merge rationale. Every raw operator must belong to exactly one cluster.
+
+Run clustering:
 
 ```powershell
-python tests/test_operator_clustering.py --config config_operator.yaml
+.venv\Scripts\python.exe tests\test_operator_clustering.py `
+  --config config_operator.yaml `
+  --operator_pool tests\outputs\operators\<run>\operator_pool.json
 ```
 
-An explicit pool can also be supplied:
+The clustered library uses:
 
-```powershell
-python tests/test_operator_clustering.py --config config_operator.yaml --operator_pool path\to\operator_pool.json
+```json
+{
+  "schema_version": "compact_operator_library_v1"
+}
 ```
 
-Clustering results are saved to `tests/outputs/cluster/<dataset>_<timestamp>/`.
+## Test-time workflow composition
 
-## Method configuration
+The composer receives:
 
-Select the method in `config.yaml`:
+- one held-out test case without a label;
+- the compact operator library;
+- available sources.
 
-```yaml
-method: simple_generate_evaluate_decide  # progressive_signal_discovery | simple_generate_evaluate_decide
+It creates multiple workflows by connecting operator outputs to semantically
+compatible inputs. It must state any required adaptation explicitly and may not
+pretend that incompatible interfaces connect.
+
+The composer chooses a recommended workflow from case and source applicability
+only. It has no ground truth, historical candidate rank, or operator reward.
+
+## Future execution and reflection
+
+The next research step is to determine whether a selected operator or workflow
+actually improves prediction.
+
+A minimal evaluation loop is:
+
+```text
+compose workflow
+    ↓
+generate executable implementation
+    ↓
+run on validation cases
+    ↓
+measure ranking change
+    ↓
+attribute gains or failures to operators
+    ↓
+retain, revise, or remove operators
 ```
 
-Method-specific settings use the `simple_signal_` and `psd_` prefixes. The simple method's default additional refinement budget is:
+Useful measurements include:
 
-```yaml
-simple_signal_max_refinement_rounds: 1
-```
+- prediction accuracy or ranking gain over a baseline;
+- operator selection frequency;
+- execution success rate;
+- marginal gain when an operator is added or removed;
+- redundant operator pairs;
+- source cost and latency;
+- semantic-interface connection failures.
 
-The current bundle's train-side context policy is explicit for both methods:
+Rank-based reflection should be introduced only after code generation can
+reliably execute the compact operator interfaces. Otherwise execution failures
+and operator quality become confounded.
 
-```yaml
-psd_current_bundle_train_context_policy: allow  # allow | exclude
-simple_signal_current_bundle_train_context_policy: allow  # allow | exclude
-```
+## MVP interpretation
 
-The policy is included in every Source Capability Manifest so generated investigations can distinguish same-bundle train context from other historical contexts.
+The induction result should be judged on three separate levels:
+
+1. **Atomicity**: is each object one transformation rather than a strategy?
+2. **Reusability**: is it independent of the current answer and item identity?
+3. **Composability**: can a later agent infer meaningful input/output links?
+
+Passing JSON validation establishes only structural validity. It does not prove
+that an operator is useful, executable, or improves prediction. Those claims
+require downstream execution and ranking experiments.

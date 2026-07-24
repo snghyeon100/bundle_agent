@@ -107,6 +107,7 @@ async def _run(args):
             "library_min_size": int(conf.get("operator_library_min_size", 8)),
             "library_max_size": int(conf.get("operator_library_max_size", 12)),
             "source_manifest_used": False,
+            "source_lists_preserved_from_operator_pool": True,
             **resolved,
         },
     )

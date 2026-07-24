@@ -1,4 +1,4 @@
-"""Core orchestration for the rank-free validation-induced operator MVP."""
+"""Core orchestration for compact operator induction and composition."""
 
 import json
 import os
@@ -13,6 +13,7 @@ from .prompts import clustering_prompt, composition_prompt, induction_prompt
 from .schemas import (
     OPERATOR_FIELDS,
     normalize_library,
+    operator_connection_diagnostics,
     validate_induction_result,
     validate_operator,
     validate_operator_library,
@@ -87,6 +88,108 @@ def build_operator_source_manifest(conf):
     return workspace, manifest
 
 
+def operator_capability_manifest(source_manifest, dataset):
+    """Convert concrete workspace files into path-free semantic capabilities."""
+    capabilities = []
+    for source in source_manifest.get("sources", []):
+        name = str(source.get("name", ""))
+        lower = name.lower()
+        if lower == "count.json":
+            capability_id = "dataset_statistics"
+            operations = ["inspect entity counts", "check index ranges"]
+        elif lower == "item_info.json":
+            capability_id = "item_metadata"
+            operations = ["lookup item attributes", "filter attributes", "extract semantic cues"]
+        elif lower == "bi_train.txt":
+            capability_id = "bundle_item_history"
+            operations = [
+                "invert bundle-item relations",
+                "retrieve co-occurrence",
+                "expand item neighborhoods",
+                "compute conditional frequency",
+                "compute association lift",
+            ]
+        elif lower == "ui_full.txt":
+            capability_id = "user_item_history"
+            operations = [
+                "invert user-item relations",
+                "retrieve shared audiences",
+                "compare candidate audiences",
+                "aggregate user-group support",
+            ]
+        elif lower == "content_feature.pt":
+            capability_id = "item_content_embedding"
+            operations = [
+                "lookup item vectors",
+                "compute similarity or distance",
+                "build bundle centroid",
+                "compute candidate margins",
+            ]
+        elif lower == "description_feature.pt":
+            capability_id = "item_description_embedding"
+            operations = [
+                "lookup item vectors",
+                "compute similarity or distance",
+                "build bundle centroid",
+                "compute candidate margins",
+            ]
+        elif lower == "item_cf_feature.pt":
+            capability_id = "user_collaborative_embedding"
+            operations = [
+                "lookup item vectors",
+                "compare collaborative neighborhoods",
+                "compute similarity or candidate margins",
+            ]
+        elif lower.endswith("_lightgcn_bi_feature.pt"):
+            capability_id = "bundle_collaborative_embedding"
+            operations = [
+                "lookup item vectors",
+                "compare bundle-affiliation representations",
+                "compute similarity or candidate margins",
+            ]
+        else:
+            continue
+        capability = {
+            "id": capability_id,
+            "entities": source.get("entities", []),
+            "relations": source.get("relations", []),
+            "format": source.get("format", ""),
+            "available_operations": operations,
+        }
+        for field in ("fields", "modality", "expected_shape", "row_alignment"):
+            if field in source:
+                capability[field] = source[field]
+        capabilities.append(capability)
+    return {
+        "schema_version": "operator_source_capabilities_v1",
+        "dataset": str(dataset),
+        "capabilities": capabilities,
+        "generic_transformations": source_manifest.get("generic_transformations", []),
+        "typed_id_rules": source_manifest.get("typed_id_rules", []),
+        "leakage_rules": source_manifest.get("leakage_rules", []),
+        "current_bundle_train_context_policy": source_manifest.get(
+            "current_bundle_train_context_policy"
+        ),
+    }
+
+
+def build_operator_capability_manifest(conf):
+    """Prepare sources once and expose a path-free manifest for induction."""
+    workspace, source_manifest = build_operator_source_manifest(conf)
+    capabilities = operator_capability_manifest(source_manifest, conf["dataset"])
+    return workspace, source_manifest, capabilities
+
+
+def _capability_names(source_capabilities):
+    return {
+        capability.get("id")
+        for capability in source_capabilities.get("capabilities", [])
+        if isinstance(capability, dict)
+        and isinstance(capability.get("id"), str)
+        and capability["id"].strip()
+    }
+
+
 async def _request_json(call_text, prompt, step_name):
     raw = await call_text(prompt, step_name)
     parsed = parse_json_from_text(raw)
@@ -100,13 +203,19 @@ async def induce_raw_operators(
     conf,
     call_text,
     *,
+    source_capabilities,
     operators_per_case=None,
     trace_callback=None,
 ):
-    """Induce a raw operator pool from labeled validation samples only."""
+    """Induce compact source-aware operators from labeled validation samples."""
     per_case = int(operators_per_case or conf.get("operator_induction_count", 4))
     if per_case < 1:
         raise ValueError("operator_induction_count must be at least 1")
+    if not isinstance(source_capabilities, dict) or not source_capabilities.get(
+        "capabilities"
+    ):
+        raise ValueError("source_capabilities must contain available capabilities")
+    allowed_source_names = _capability_names(source_capabilities)
 
     raw_operators = []
     induction_traces = []
@@ -116,6 +225,7 @@ async def induce_raw_operators(
         discovery_cases.append(case)
         prompt = induction_prompt(
             case,
+            source_capabilities,
             per_case,
             text_only=bool(conf.get("operator_prompt_text_only", True)),
         )
@@ -123,7 +233,11 @@ async def induce_raw_operators(
         raw = await call_text(prompt, step_name)
         result = parse_json_from_text(raw)
         issues = (
-            validate_induction_result(result, expected_count=per_case)
+            validate_induction_result(
+                result,
+                expected_count=per_case,
+                allowed_source_names=allowed_source_names,
+            )
             if isinstance(result, dict)
             else ["induction result must be a JSON object"]
         )
@@ -133,6 +247,9 @@ async def induce_raw_operators(
             "raw_response": raw,
             "parsed_response": result,
             "validation_issues": issues,
+            "connection_diagnostics": operator_connection_diagnostics(
+                result.get("operators", []) if isinstance(result, dict) else []
+            ),
             "operators": [],
         }
         if issues:
@@ -154,6 +271,7 @@ async def induce_raw_operators(
             trace_callback(trace)
 
     return {
+        "source_capabilities": source_capabilities,
         "discovery_cases": discovery_cases,
         "induction_traces": induction_traces,
         "raw_operators": raw_operators,
@@ -198,12 +316,22 @@ async def cluster_raw_operators(
         _semantic_operator_view(operator, include_identity=True)
         for operator in raw_operators
     ]
+    allowed_source_names = {
+        source
+        for operator in raw_operators
+        if isinstance(operator, dict)
+        for source in operator.get("sources", [])
+        if isinstance(source, str) and source.strip()
+    }
     c_prompt = clustering_prompt(semantic_pool, conf["dataset"], minimum, maximum)
     clustering_raw = await call_text(c_prompt, "functional operator clustering")
     clustering_result = parse_json_from_text(clustering_raw)
     library = normalize_library(clustering_result, conf["dataset"])
     issues = (
-        validate_operator_library(library)
+        validate_operator_library(
+            library,
+            allowed_source_names=allowed_source_names,
+        )
         if isinstance(clustering_result, dict)
         else ["clustering result must be a JSON object"]
     )
@@ -253,6 +381,7 @@ async def discover_operator_library(
     conf,
     call_text,
     *,
+    source_capabilities,
     operators_per_case=None,
     min_library_size=None,
     max_library_size=None,
@@ -262,6 +391,7 @@ async def discover_operator_library(
         samples,
         conf,
         call_text,
+        source_capabilities=source_capabilities,
         operators_per_case=operators_per_case,
     )
     clustering = await cluster_raw_operators(
@@ -330,6 +460,10 @@ def save_operator_artifacts(output_dir, discovery=None, composition=None):
     """Persist inspectable prompts, raw responses, and normalized JSON artifacts."""
     os.makedirs(output_dir, exist_ok=True)
     if discovery:
+        _write_json(
+            os.path.join(output_dir, "source_capabilities.json"),
+            discovery["source_capabilities"],
+        )
         _write_json(os.path.join(output_dir, "discovery_cases.json"), discovery["discovery_cases"])
         _write_json(os.path.join(output_dir, "raw_operators.json"), discovery["raw_operators"])
         _write_json(os.path.join(output_dir, "operator_library.json"), discovery["library"])
