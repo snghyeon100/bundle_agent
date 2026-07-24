@@ -34,9 +34,10 @@ def induction_prompt(
     semantic_case = _semantic_case(case, text_only)
     dataset_name = str(case.get("dataset") or "").lower()
     fashion_outfit_semantics = (
-        "패션 outfit은 서로 비슷하거나 대체 가능한 item들의 단순한 집합이 아니다. "
-        "서로 다른 의류·액세서리 역할을 수행하면서도 스타일, 색상, 소재, 계절, 격식, "
-        "착용 상황 측면에서 전체적으로 조화를 이루는 상호보완적인 구성이다.\n\n"
+        "A fashion outfit is not a simple collection of mutually similar or interchangeable "
+        "items. It is a complementary composition in which different clothing and accessory "
+        "roles work together while maintaining overall coherence in style, color, material, "
+        "season, formality, and occasion.\n\n"
         if dataset_name in {"pog", "pog_dense"}
         else ""
     )
