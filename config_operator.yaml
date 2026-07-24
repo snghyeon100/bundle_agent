@@ -12,17 +12,17 @@ shuffle_seed: 41
 
 # One LLM is sufficient for operator induction and clustering
 llm_provider: openai
-model: gpt-4.1-mini
+model: gpt-5-mini
 temperature: 0.0
 openai_send_temperature: false
 openai_reasoning_effort: "low"
 code_generation_provider: openai #gemini
-code_generation_model: gpt-4.1-mini #gemini-3-flash-preview
+code_generation_model: gpt-5-mini #gemini-3-flash-preview
 code_generation_api_key_env: "DMLAB_KEY"
 operator_max_output_tokens: 15000
 
 # Rank-free operator MVP
-operator_discovery_count: 10
+operator_discovery_count: 12
 operator_discovery_seed: 42
 operator_induction_count: 4       # exact number of raw operators generated per validation sample
 operator_prompt_text_only: true   # IDs/metadata stay in artifacts but are hidden from the LLM prompt
