@@ -1,4 +1,4 @@
-"""Extract a source-aware typed operator pool from validation samples.
+"""Extract candidate-blind program specs with one LLM call per discovery case.
 
 Usage:
     python tests/test_operator_induction.py --config config_operator.yaml
@@ -70,7 +70,7 @@ async def _run(args):
     sample_count = int(args.sample_count or conf.get("operator_discovery_count", 5))
     operators_per_sample = int(conf.get("operator_induction_count", 4))
     samples = sample_validation_cases(conf, sample_count)
-    _, _, source_capabilities = build_operator_capability_manifest(conf)
+    _, _, source_manifest = build_operator_capability_manifest(conf)
     client, resolved = _build_client(conf)
 
     timestamp = time.strftime("%Y%m%d_%H%M%S")
@@ -90,21 +90,29 @@ async def _run(args):
         {
             "phase": "operator_induction",
             "dataset": conf["dataset"],
-            "validation_source": ["bi_valid_input.txt", "bi_valid_gt.txt"],
+            "discovery_source": "bi_valid_input.txt",
+            "evaluator_only_source": "bi_valid_gt.txt",
             "sample_count": sample_count,
-            "operators_per_sample": operators_per_sample,
+            "max_operators_per_sample": operators_per_sample,
+            "llm_calls_per_sample": 1,
+            "running_operator_memory_used": True,
+            "operator_memory_max_size": int(
+                conf.get("operator_memory_max_size", 24)
+            ),
+            "ground_truth_used_in_prompt": False,
+            "candidate_options_used_in_prompt": False,
             "source_manifest_used": True,
-            "source_capability_ids": [
-                capability["id"]
-                for capability in source_capabilities.get("capabilities", [])
+            "source_component_ids": [
+                component["id"]
+                for component in source_manifest.get("components", [])
             ],
             "seed": int(conf.get("operator_discovery_seed", conf.get("seed", 45))),
             **resolved,
         },
     )
     _write_json(
-        os.path.join(output_dir, "source_capabilities.json"),
-        source_capabilities,
+        os.path.join(output_dir, "source_manifest.json"),
+        source_manifest,
     )
 
     async def call_text(prompt, step_name):
@@ -123,32 +131,47 @@ async def _run(args):
         _write_text(os.path.join(case_dir, "output.txt"), trace["raw_response"])
         _write_json(os.path.join(case_dir, "parsed_response.json"), trace["parsed_response"])
         _write_json(os.path.join(case_dir, "validation_issues.json"), trace["validation_issues"])
+        _write_json(os.path.join(case_dir, "prompt_case.json"), trace["prompt_case"])
+        _write_json(os.path.join(case_dir, "evaluation.json"), trace["evaluation"])
         _write_json(
-            os.path.join(case_dir, "connection_diagnostics.json"),
-            trace["connection_diagnostics"],
+            os.path.join(case_dir, "operator_memory_before.json"),
+            trace["operator_memory_before"],
+        )
+        _write_json(
+            os.path.join(case_dir, "operator_memory_after.json"),
+            trace["operator_memory_after"],
+        )
+        _write_json(
+            os.path.join(case_dir, "hypotheses.json"),
+            trace["hypotheses"],
         )
         _write_json(os.path.join(case_dir, "operators.json"), trace["operators"])
 
     print(f">>> Dataset: {conf['dataset']}")
-    print(">>> Validation source: bi_valid_input.txt + bi_valid_gt.txt")
+    print(">>> Discovery prompt: partial bundle only; candidate options and GT hidden")
     print(f">>> Samples: {sample_count}")
-    print(f">>> Operators per sample: {operators_per_sample}")
+    print(f">>> Maximum operators per sample: {operators_per_sample}")
+    print(">>> Induction: one candidate-blind LLM call per sample")
     print(
-        ">>> Source capabilities: "
+        ">>> Source components: "
         + ", ".join(
-            capability["id"]
-            for capability in source_capabilities.get("capabilities", [])
+            component["id"]
+            for component in source_manifest.get("components", [])
         )
     )
     result = await induce_raw_operators(
         samples,
         conf,
         call_text,
-        source_capabilities=source_capabilities,
+        source_capabilities=source_manifest,
         trace_callback=save_trace,
     )
     _write_json(os.path.join(output_dir, "validation_samples.json"), result["discovery_cases"])
     _write_json(os.path.join(output_dir, "operator_pool.json"), result["raw_operators"])
+    _write_json(
+        os.path.join(output_dir, "operator_memory.json"),
+        result["operator_memory"],
+    )
     operators_by_case = {}
     for operator in result["raw_operators"]:
         operators_by_case.setdefault(operator["origin_case_id"], []).append(operator)
@@ -159,8 +182,7 @@ async def _run(args):
             "sample_id": case_id,
             "bundle_id": case["bundle_id"],
             "input_items": case["partial_items"],
-            "candidate_items": case["candidates"],
-            "gt_item": case["ground_truth"],
+            "evaluation": case["evaluation"],
             "operators": operators_by_case.get(case_id, []),
         }
         sample_views.append(sample_view)
@@ -170,8 +192,11 @@ async def _run(args):
         os.path.join(output_dir, "summary.json"),
         {
             "validation_sample_count": len(result["discovery_cases"]),
-            "operators_per_sample": result["operators_per_case"],
+            "max_operators_per_sample": result["max_operators_per_case"],
+            "llm_calls_per_sample": 1,
             "raw_operator_count": len(result["raw_operators"]),
+            "final_operator_memory_count": len(result["operator_memory"]),
+            "operator_memory_max_size": result["operator_memory_max_size"],
         },
     )
     print(f">>> Raw operator count: {len(result['raw_operators'])}")

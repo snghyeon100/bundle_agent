@@ -3,14 +3,14 @@
 dataset: pog_dense       # pog | pog_dense | spotify | spotify_sparse
 data_path: ./datasets
 
-# Candidate construction for validation discovery
+# Benchmark construction; candidates and GT are evaluator-only and never enter induction prompts
 num_cans: 10
 num_token: 5
 toy_eval: -1
 seed: 45
 shuffle_seed: 41
 
-# One LLM is sufficient for operator induction and clustering
+# The same LLM may serve candidate-blind induction and offline program compilation
 llm_provider: openai
 model: gpt-5-mini
 temperature: 0.0
@@ -21,16 +21,37 @@ code_generation_model: gpt-5-mini #gemini-3-flash-preview
 code_generation_api_key_env: "DMLAB_KEY"
 operator_max_output_tokens: 15000
 
-# Rank-free operator MVP
+# Hypothesis-conditioned candidate-program MVP
 operator_discovery_count: 12
 operator_discovery_seed: 42
-operator_induction_count: 4       # exact number of raw operators generated per validation sample
-operator_prompt_text_only: true   # IDs/metadata stay in artifacts but are hidden from the LLM prompt
-operator_library_min_size: 6
-operator_library_max_size: 10
+operator_induction_count: 6       # maximum hypotheses/program specs per discovery sample
+operator_memory_max_size: 24      # candidate-memory signatures shown to later samples
+operator_prompt_text_only: true   # prompt omits IDs as well as all candidate/GT fields
+operator_dedup_similarity_threshold: 0.90
+operator_library_min_size: 1
+operator_library_max_size: 20
+operator_candidate_budget: 10
+operator_evidence_budget: 8
 
-# Source-aware compact operator induction. Concrete paths are hidden; the prompt receives
-# path-free entity/relation capabilities and the operations each source supports.
+# Online-only dynamic hypothesis-program synthesis (exactly two LLM calls per case)
+online_hypothesis_max_count: 3
+online_candidate_budget_per_hypothesis: 5
+online_evidence_budget_per_hypothesis: 8
+online_total_candidate_budget: 10
+online_program_timeout_seconds: 60
+online_program_max_output_tokens: 18000
+online_prediction_max_output_tokens: 800
+online_source_max_query_ids: 5000
+online_source_max_embedding_items: 2048
+online_source_max_neighbor_limit: 200
+
+# One-call diagnostic: select every defensible option without one final prediction
+plausible_set_max_output_tokens: 2500
+plausible_set_sample_count: 250
+plausible_set_max_concurrent: 1
+
+# Source-aware operator induction and code generation share one manifest. Each component
+# includes a relative path plus the concrete parsing and ID-alignment contract.
 code_workspace_root: ./agent_workspaces
 code_current_bundle_train_context_policy: allow
 code_allowed_files:

@@ -80,6 +80,9 @@ _BASE_CONTRACTS = {
             "PyTorch item embedding derived from ui_full.txt; validate object type "
             "and item-axis alignment"
         ),
+        "expected_shape": ["#I", 64],
+        "row_alignment": "tensor row index equals canonical integer item_id",
+        "normalization": "not recorded; inspect norms before assuming unit normalization",
     },
 }
 
@@ -179,6 +182,11 @@ def _source_contract(filename, dataset=None):
             "format": (
                 "PyTorch item embedding derived from bi_train.txt; validate object type "
                 "and item-axis alignment"
+            ),
+            "expected_shape": ["#I", 64],
+            "row_alignment": "tensor row index equals canonical integer item_id",
+            "normalization": (
+                "not recorded; inspect norms before assuming unit normalization"
             ),
         }
     else:

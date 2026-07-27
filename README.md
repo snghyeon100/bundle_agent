@@ -1,287 +1,257 @@
-# Bundle Agent: Compact Operator Learning MVP
+# Bundle Agent: Candidate-Program Learning MVP
 
 ## Research objective
 
-This project learns reusable operations for bundle completion.
-
-The central distinction is:
-
-```text
-operator = one reusable input → transformation → output
-strategy = multiple operators connected for one prediction case
-```
-
-Operator induction must therefore produce atomic transformations, not complete
-candidate-ranking pipelines. Workflow composition, code generation, execution,
-and rank-based reflection are separate downstream stages.
-
-## Current pipeline
+Bundle completion is underdetermined: the same partial bundle can support
+multiple plausible completion intents. The MVP therefore discovers several
+case-conditioned hypotheses and turns each into a reusable, source-bounded
+candidate-retrieval program.
 
 ```text
-validation cases with hindsight labels
-    ↓
-compact operator induction
-    ↓
-raw operator pool
-    ↓
-semantic clustering
-    ↓
-reusable operator library
-    ↓
-test-time workflow composition
-    ↓
-code generation and execution
-    ↓
-prediction
+partial bundle
+  -> candidate-blind completion hypotheses
+  -> reusable candidate-program specifications
+  -> deterministic deduplication
+  -> offline compilation
+  -> held-out execution and admission
+  -> verified program library
 ```
 
-The current MVP implements induction, clustering, and workflow composition.
-Prediction-level operator evaluation and rank-based reflection are planned
-after the basic operator abstraction is validated.
+There is no operator compatibility graph, deterministic path, LLM clustering,
+or test-sample-specific code generation.
 
-## Compact operator representation
+## Program definition
 
-Every induced operator has exactly six fields:
+A macro operator is a reusable executable program that operationalizes one
+completion hypothesis. Given any partial bundle, it searches permitted sources
+for a small set of plausible missing-item candidates and returns source
+provenance for every proposed item.
+
+```text
+program = one hypothesis
+        + one source-bounded retrieval procedure
+        + bounded candidate proposals
+        + candidate-linked provenance
+```
+
+The fixed runtime contract is:
+
+```python
+def execute(
+    partial_item_ids,
+    source_api,
+    candidate_budget,
+    evidence_budget,
+):
+    ...
+```
+
+Every execution returns `candidate_proposal_set_v1`:
 
 ```json
 {
-  "name": "ContrastCandidateIntent",
-  "objective": "Expose candidate-specific semantic agreement and conflict.",
-  "input": "candidate metadata and a partial-bundle intent hypothesis",
-  "operation": "contrast each candidate's attributes against the inferred intent",
-  "output": "candidate-indexed semantic agreement and conflict evidence",
-  "sources": ["item_metadata"]
+  "schema_version": "candidate_proposal_set_v1",
+  "program_id": "program_001",
+  "hypothesis": "Related historical bundles contain plausible missing items.",
+  "candidate_proposals": [
+    {
+      "item_id": 42,
+      "evidence_refs": ["E1"]
+    }
+  ],
+  "evidence_records": [
+    {
+      "evidence_id": "E1",
+      "type": "historical_bundle_context",
+      "source": "bundle_item_history",
+      "anchor_item_ids": [1, 2],
+      "related_item_ids": [42, 51],
+      "related_bundle_ids": [9],
+      "attributes": {}
+    }
+  ],
+  "execution_trace": {
+    "used_sources": ["bundle_item_history"],
+    "candidate_budget": 10,
+    "evidence_budget": 8
+  }
 }
 ```
 
-The fields mean:
+Programs may use counts, similarities, and other numeric measures internally to
+retrieve and compress evidence. Their external task-level output is candidate
+items with source provenance, not an opaque answer score.
 
-- `name`: concise reusable operation name;
-- `objective`: why the transformation is useful;
-- `input`: one logical input artifact in concise natural language;
-- `operation`: one central semantic transformation;
-- `output`: one reusable intermediate artifact;
-- `sources`: capability IDs needed to execute the operation, or `[]`.
+## First LLM call: candidate-blind induction
 
-The induction output deliberately omits:
+Each discovery sample uses one LLM call. The prompt contains:
 
-- fixed operator kinds;
-- nested type contracts;
-- anchors;
-- preconditions;
-- failure-signal lists;
-- applicability prose;
-- workflow order;
-- next-operator references.
+- partial-item text and metadata;
+- source capabilities and GT-independent diagnostics;
+- compact candidate-program memory.
 
-This keeps raw operators easy to inspect, compare, embed, and cluster.
+It never contains:
 
-## No predefined type catalog
+- answer options;
+- the missing-item ground truth;
+- candidate ranks or labels.
 
-`input` and `output` are concise natural-language artifact descriptions. The
-model is not given a fixed type ontology, and lexical equality is not required.
+The call first emits short sample-conditioned case hypotheses, then maps them
+one-to-one to reusable program specifications:
 
-A later workflow composer or code-generation agent must determine whether an
-operator output can satisfy another operator input. If descriptions differ but
-the underlying artifacts are compatible, the downstream agent may construct an
-explicit adapter.
-
-This is an experimental choice: the MVP tests whether semantic interfaces are
-sufficient before introducing a human-designed type system.
-
-## Source capabilities are not operators
-
-The source-capability manifest describes executable data access primitives,
-including:
-
-- item metadata;
-- bundle-item history;
-- user-item history;
-- content and description embeddings;
-- collaborative embeddings;
-- dataset statistics.
-
-An induced operator may list these capability IDs in `sources`, but a lookup
-alone is not considered a learned operator.
-
-```text
-source capability:
-    retrieve item embeddings
-
-induced operator:
-    transform bundle and candidate embeddings into candidate-specific
-    supporting and conflicting evidence
+```json
+{
+  "hypotheses": [
+    {
+      "id": "H1",
+      "observed_cues": [
+        "tailored outerwear silhouette",
+        "dark coordinated palette"
+      ],
+      "statement": "The bundle may be assembling a polished coordinated outfit that needs a complementary item role."
+    }
+  ],
+  "operators": [
+    {
+      "hypothesis_id": "H1",
+      "name": "RetrieveRecurringBundleCompanions",
+      "hypothesis": "Items recurring across partial-conditioned historical bundles are plausible completions.",
+      "required_sources": ["bundle_item_history"],
+      "applicability": [
+        "partial items have historical bundle coverage"
+      ],
+      "evidence_types": ["historical_bundle_context"],
+      "pseudocode": [
+        "retrieve historical bundles containing partial items",
+        "collect non-partial items from those bundles",
+        "retain a bounded set of recurring candidate items",
+        "return representative bundle provenance for each candidate"
+      ],
+      "output_contract": "candidate_proposals_with_source_provenance"
+    }
+  ]
+}
 ```
 
-The distinction prevents the raw operator pool from becoming a renamed list of
-available files or APIs.
-
-## Offline stage 1: operator induction
-
-Induction samples labeled examples only from the validation split:
-
-- `bi_valid_input.txt`
-- `bi_valid_gt.txt`
-
-The test split is not used for operator discovery.
-
-For each sampled validation case, the model receives:
-
-- partial-bundle item descriptions;
-- a finite candidate set;
-- the ground-truth candidate as hindsight evidence;
-- the source-capability manifest.
-
-Ground truth is used only to discover what evidence would have been
-discriminative. It must never appear in an operator's deployable fields.
-
-The prompt requires each operator to:
-
-- describe one atomic transformation;
-- remain reusable across cases;
-- avoid product names, candidate labels, and item IDs;
-- avoid references to other generated operators or execution order;
-- produce an intermediate artifact rather than a final choice;
-- avoid rank, prediction, and score-only outputs;
-- use only available capability IDs in `sources`.
-
-The deterministic validator enforces:
-
-- the exact six-field schema;
-- non-empty textual fields;
-- valid and unique source IDs;
-- no ground-truth or correct-answer dependency.
-
-Rank, prediction, final-choice, and score-only outputs remain prohibited by the
-induction prompt, but are not rejected by a brittle keyword-based validator.
+The sample-specific hypotheses and their observed cues are retained in induction
+traces. Candidate memory exposes only compact forbidden signatures (`name`,
+generalized `hypothesis`, `required_sources`, and `evidence_types`) so previous
+programs act as an exclusion list rather than as generation templates.
 
 Run induction:
 
 ```powershell
-.venv\Scripts\python.exe tests\test_operator_induction.py `
+python tests/test_operator_induction.py `
   --config config_operator.yaml `
-  --sample_count 3
+  --sample_count 3 `
+  --output_dir tests/outputs/operators/candidate_program_test
 ```
 
-The run writes:
+## Deterministic deduplication
 
-```text
-tests/outputs/operators/<dataset>_<timestamp>/
-├── run.json
-├── source_capabilities.json
-├── validation_samples.json
-├── operator_pool.json
-├── operators_by_sample.json
-├── summary.json
-├── cases/
-│   └── <case_id>/
-│       ├── input.txt
-│       ├── output.txt
-│       ├── parsed_response.json
-│       ├── validation_issues.json
-│       ├── connection_diagnostics.json
-│       └── operators.json
-└── samples/
-    └── <case_id>.json
-```
-
-## Offline stage 2: semantic clustering
-
-Clustering operates on the saved raw operator pool. Operators are merged only
-when the following describe the same reusable transition:
-
-1. objective;
-2. input artifact;
-3. central operation;
-4. output artifact.
-
-Shared sources or similar names are not sufficient grounds for merging.
-
-Each refined operator keeps the same compact six-field representation and adds:
-
-```json
-{
-  "derived_from": ["bundle_20517__op3", "bundle_28141__op2"]
-}
-```
-
-Clusters additionally record their member IDs, representative operator, and
-merge rationale. Every raw operator must belong to exactly one cluster.
-
-Run clustering:
+Deduplication makes no LLM call. It groups exact or high-similarity
+specifications only when their required sources and evidence types match, and
+records every member operator and discovery-case provenance.
 
 ```powershell
-.venv\Scripts\python.exe tests\test_operator_clustering.py `
+python tests/test_operator_clustering.py `
   --config config_operator.yaml `
-  --operator_pool tests\outputs\operators\<run>\operator_pool.json
+  --operator_pool tests/outputs/operators/<run>/operator_pool.json
 ```
 
-The clustered library uses:
+Despite the legacy script name, this stage is deterministic program
+deduplication, not semantic LLM clustering.
 
-```json
-{
-  "schema_version": "compact_operator_library_v1"
-}
+## Second LLM call type: offline compilation
+
+After deduplication, each unique program receives one compilation call. The
+compiler sees only:
+
+- the canonical reusable specification;
+- its permitted source manifest;
+- the shared `SourceAPI` contract;
+- the fixed `CandidateProposalSet` output schema.
+
+It does not see the discovery sample, answer options, or ground truth.
+
+```powershell
+python tests/test_operator_code_generation.py `
+  --config config_operator.yaml `
+  --library tests/outputs/dedup/<run>/operator_library.json
 ```
 
-## Test-time workflow composition
+The generated function is stored with a SHA-256 hash. Any code change
+invalidates its validation result. Held-out validation and online inference must
+execute the exact same code artifact.
 
-The composer receives:
+## Verification and admission
 
-- one held-out test case without a label;
-- the compact operator library;
-- available sources.
+`operator_learning.verify_compiled_programs` accepts an injected sandbox runner
+and evaluates each immutable program on held-out cases. The runtime validator
+checks:
 
-It creates multiple workflows by connecting operator outputs to semantically
-compatible inputs. It must state any required adaptation explicitly and may not
-pretend that incompatible interfaces connect.
+- source scope;
+- candidate and evidence budgets;
+- candidate-linked provenance;
+- output schema;
+- execution success.
 
-The composer chooses a recommended workflow from case and source applicability
-only. It has no ground truth, historical candidate rank, or operator reward.
+Initial retrieval metrics include:
 
-## Future execution and reflection
+- candidate recall under a fixed budget;
+- retrieval rank and reciprocal rank;
+- candidate-set size;
+- execution success rate.
 
-The next research step is to determine whether a selected operator or workflow
-actually improves prediction.
+`operator_learning.admit_verified_programs` creates separate verified and
+rejected registries. Unverified candidate memory is never treated as an online
+library.
 
-A minimal evaluation loop is:
+## Online-only dynamic alternative
+
+`online_hypothesis_program` implements a separate two-call path that does not
+use an offline operator library:
 
 ```text
-compose workflow
-    ↓
-generate executable implementation
-    ↓
-run on validation cases
-    ↓
-measure ranking change
-    ↓
-attribute gains or failures to operators
-    ↓
-retain, revise, or remove operators
+partial bundle + source diagnostics
+  -> LLM1: semantic hypotheses + one case-conditioned Python program per hypothesis
+  -> timeout-bounded execution through a scoped, read-only SourceAPI
+  -> resolve raw source IDs into readable retrieved examples and contexts
+  -> LLM2: compare retrieved examples with the benchmark answer options
+  -> prediction
 ```
 
-Useful measurements include:
+LLM1 never receives benchmark candidates or ground truth. LLM2 receives the
+answer-option labels and text, but not raw retrieved item IDs, bundle/user IDs,
+or opaque retrieval scores. Failed programs are recorded and omitted without a
+repair call, preserving exactly two LLM calls per case.
 
-- prediction accuracy or ranking gain over a baseline;
-- operator selection frequency;
-- execution success rate;
-- marginal gain when an operator is added or removed;
-- redundant operator pairs;
-- source cost and latency;
-- semantic-interface connection failures.
+```powershell
+python tests/test_online_hypothesis_program.py `
+  --config config_operator.yaml `
+  --split test `
+  --sample_idx 1
+```
 
-Rank-based reflection should be introduced only after code generation can
-reliably execute the compact operator interfaces. Otherwise execution failures
-and operator quality become confounded.
+## Direct plausible-set diagnostic
 
-## MVP interpretation
+Before attributing errors to retrieval programs or final aggregation, a
+one-call diagnostic asks the model to return every answer option that it can
+defend under at least one coherent completion hypothesis. It does not impose a
+fixed set size. In the same response, the model separately ranks all supplied
+options from most to least plausible. Evaluation records plausible-set coverage
+and size together with Hit@1/3/5, MRR, and mean GT rank. It also checks whether
+the plausible set exactly matches the top-k ranking where k is the model's own
+plausible-set size, and reports the resulting self-consistency rate.
 
-The induction result should be judged on three separate levels:
+The default batch size is 250 samples:
 
-1. **Atomicity**: is each object one transformation rather than a strategy?
-2. **Reusability**: is it independent of the current answer and item identity?
-3. **Composability**: can a later agent infer meaningful input/output links?
+```powershell
+python tests/test_direct_plausible_set.py `
+  --config config_operator.yaml `
+  --split test `
+  --sample_count 250
+```
 
-Passing JSON validation establishes only structural validity. It does not prove
-that an operator is useful, executable, or improves prediction. Those claims
-require downstream execution and ranking experiments.
+Use `--sample_idx 1` for a one-sample spot check. A stopped batch can continue
+from the same output directory with `--resume <output-directory>`.
