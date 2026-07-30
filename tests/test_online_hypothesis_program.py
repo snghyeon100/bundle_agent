@@ -1,4 +1,4 @@
-"""Run the two-call online hypothesis-program pipeline on one evaluation case.
+"""Run two-call source-signal synthesis and evidence-grounded prediction.
 
 Usage:
     python tests/test_online_hypothesis_program.py \
@@ -109,7 +109,7 @@ async def _run(args):
             prediction_model["model"],
             prompt,
             conf,
-            int(conf.get("online_prediction_max_output_tokens", 800)),
+            int(conf.get("online_prediction_max_output_tokens", 2000)),
             step_name,
         )
 
@@ -117,12 +117,15 @@ async def _run(args):
     print(f">>> Sample: {split}[{sample_idx}] / bundle_{sample['bundle_id']}")
     print(
         f">>> LLM1: {program_model['provider']} / {program_model['model']} "
-        "(candidate-blind hypotheses + Python programs)"
+        "(completion hypotheses + exemplar retrieval programs)"
     )
-    print(">>> Runtime: executing each generated program with scoped SourceAPI")
+    print(
+        ">>> Runtime: executing each hypothesis-conditioned retrieval program "
+        "once on the partial bundle"
+    )
     print(
         f">>> LLM2: {prediction_model['provider']} / "
-        f"{prediction_model['model']} (evidence-aware prediction)"
+            f"{prediction_model['model']} (evidence-grounded full ranking)"
     )
     result = await run_online_hypothesis_program(
         sample,
@@ -146,20 +149,22 @@ async def _run(args):
     _write_json(
         os.path.join(output_dir, "run.json"),
         {
-            "phase": "online_hypothesis_program_prediction",
+            "phase": "online_hypothesis_exemplar_retrieval",
             "dataset": conf["dataset"],
             "split": split,
             "sample_idx": sample_idx,
             "bundle_id": int(sample["bundle_id"]),
             "llm_calls": 2,
+            "program_data_interface": "raw_read_only_dataset_workspace",
+            "program_contract": "partial_bundle_to_bounded_corpus_exemplars",
             "program_model": program_model,
             "prediction_model": prediction_model,
         },
     )
     _write_json(os.path.join(output_dir, "case.json"), result["case"])
     _write_json(
-        os.path.join(output_dir, "source_capabilities.json"),
-        result["source_capabilities"],
+        os.path.join(output_dir, "dataset_workspace_manifest.json"),
+        result["dataset_workspace_manifest"],
     )
     _write_text(os.path.join(output_dir, "llm1", "input.txt"), result["llm1"]["prompt"])
     _write_text(
@@ -171,26 +176,53 @@ async def _run(args):
         result["llm1"]["parsed_response"],
     )
     _write_json(
+        os.path.join(output_dir, "llm1", "effective_response.json"),
+        result["llm1"]["effective_response"],
+    )
+    _write_json(
+        os.path.join(output_dir, "llm1", "parse_repairs.json"),
+        result["llm1"]["parse_repairs"],
+    )
+    _write_json(
+        os.path.join(output_dir, "llm1", "contract_repairs.json"),
+        result["llm1"]["contract_repairs"],
+    )
+    _write_json(
         os.path.join(output_dir, "llm1", "validation_issues.json"),
         result["llm1"]["validation_issues"],
     )
-    parsed = result["llm1"]["parsed_response"]
+    _write_json(
+        os.path.join(output_dir, "llm1", "rejected_entries.json"),
+        result["llm1"]["rejected_entries"],
+    )
+    parsed = result["llm1"]["effective_response"]
     if isinstance(parsed, dict):
         for program in parsed.get("programs", []):
             if not isinstance(program, dict):
                 continue
-            program_id = str(program.get("program_id") or "unknown")
+            program_id = str(program.get("id") or "unknown")
             _write_text(
                 os.path.join(output_dir, "programs", program_id, "program.py"),
                 program.get("code", ""),
             )
             _write_json(
                 os.path.join(output_dir, "programs", program_id, "execution.json"),
-                result["executions"].get(program.get("hypothesis_id"), {}),
+                result["executions"].get(program.get("id"), {}),
+            )
+            _write_json(
+                os.path.join(output_dir, "programs", program_id, "fixation.json"),
+                result["program_fixations"].get(
+                    program.get("id"),
+                    {},
+                ),
             )
     _write_json(
-        os.path.join(output_dir, "rendered_search_evidence.json"),
-        result["rendered_search_evidence"],
+        os.path.join(output_dir, "rendered_retrieval_evidence.json"),
+        result["rendered_retrieval_evidence"],
+    )
+    _write_json(
+        os.path.join(output_dir, "retrieval_trace.json"),
+        result["retrieval_trace"],
     )
     _write_text(os.path.join(output_dir, "llm2", "input.txt"), result["llm2"]["prompt"])
     _write_text(
@@ -210,22 +242,35 @@ async def _run(args):
     evaluation = result["evaluation"]
     print(
         f">>> Programs: {evaluation['successful_program_count']} successful / "
-        f"{evaluation['program_count']} generated"
+        f"{evaluation['program_count']} admitted / "
+        f"{evaluation['proposed_program_count']} proposed"
+    )
+    if not evaluation["program_count"] and result["llm1"]["validation_issues"]:
+        print(
+            ">>> LLM1 rejection: "
+            + " | ".join(result["llm1"]["validation_issues"][:3])
+        )
+    print(
+        f">>> Retrieved exemplars: {evaluation['retrieved_example_count']} total / "
+        f"{evaluation['unique_retrieved_item_count']} unique"
     )
     print(
-        f">>> Retrieved exemplars: {evaluation['retrieved_candidate_count']} "
-        f"(GT retrieved: {evaluation['ground_truth_retrieved']})"
+        f">>> Answer-option overlap: {evaluation['answer_option_overlap_count']} "
+        f"(GT retrieved: {evaluation['gt_retrieved']})"
     )
     print(f">>> Prediction: {evaluation['prediction']}")
+    print(f">>> Ranking: {', '.join(evaluation['ranking'])}")
     print(f">>> True label: {evaluation['true_label']}")
     print(f">>> Hit: {evaluation['prediction_hit']}")
+    print(f">>> GT rank: {evaluation['gt_rank']}")
+    print(f">>> Reciprocal rank: {evaluation['reciprocal_rank']:.4f}")
     print(f">>> Output: {output_dir}")
     return 0 if evaluation["valid_prediction"] else 1
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Online multi-hypothesis Python search and prediction"
+        description="Online hypothesis-conditioned exemplar retrieval programs"
     )
     parser.add_argument("--config", default="config_operator.yaml")
     parser.add_argument("--split", default="test")

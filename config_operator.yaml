@@ -18,29 +18,37 @@ openai_send_temperature: false
 openai_reasoning_effort: "low"
 code_generation_provider: openai #gemini
 code_generation_model: gpt-5-mini #gemini-3-flash-preview
-code_generation_api_key_env: "DMLAB_KEY"
+code_generation_api_key_env: "OPENAI_KEY"
 operator_max_output_tokens: 15000
 
 # Hypothesis-conditioned candidate-program MVP
 operator_discovery_count: 12
 operator_discovery_seed: 42
-operator_induction_count: 6       # maximum hypotheses/program specs per discovery sample
-operator_memory_max_size: 24      # candidate-memory signatures shown to later samples
+operator_induction_count: 3       # exactly three strategies per discovery sample
 operator_prompt_text_only: true   # prompt omits IDs as well as all candidate/GT fields
 operator_dedup_similarity_threshold: 0.90
 operator_library_min_size: 1
 operator_library_max_size: 20
 operator_candidate_budget: 10
 operator_evidence_budget: 8
+operator_prediction_max_contexts_per_candidate: 0  # 0 keeps every generated context
+operator_prediction_max_context_chars: 0            # 0 keeps context text unchanged
+operator_prediction_max_output_tokens: 2000
+operator_prediction_sample_count: 250
+operator_prediction_max_concurrent: 1
+operator_program_max_contexts_per_candidate: 5
+operator_program_timeout_seconds: 60
 
-# Online-only dynamic hypothesis-program synthesis (exactly two LLM calls per case)
-online_hypothesis_max_count: 3
-online_candidate_budget_per_hypothesis: 5
-online_evidence_budget_per_hypothesis: 8
-online_total_candidate_budget: 10
+# Online hypothesis-conditioned exemplar-retrieval pilot (two LLM calls per case)
+online_hypothesis_count: 3
+online_retrieved_item_budget_per_hypothesis: 5
+online_max_supporting_contexts_per_item: 2
+online_max_rendered_items_per_hypothesis: 5
+online_max_rendered_supporting_contexts_per_item: 2
 online_program_timeout_seconds: 60
 online_program_max_output_tokens: 18000
-online_prediction_max_output_tokens: 800
+online_strategy_max_output_tokens: 8000
+online_prediction_max_output_tokens: 2000
 online_source_max_query_ids: 5000
 online_source_max_embedding_items: 2048
 online_source_max_neighbor_limit: 200
@@ -49,6 +57,12 @@ online_source_max_neighbor_limit: 200
 plausible_set_max_output_tokens: 2500
 plausible_set_sample_count: 250
 plausible_set_max_concurrent: 1
+
+# Two-call train-free candidate-induced set reinterpretation MVP
+reinterpretation_sample_count: 100
+reinterpretation_max_concurrent: 1
+reinterpretation_analysis_max_output_tokens: 10000
+reinterpretation_decision_max_output_tokens: 3000
 
 # Source-aware operator induction and code generation share one manifest. Each component
 # includes a relative path plus the concrete parsing and ID-alignment contract.

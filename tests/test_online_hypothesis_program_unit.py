@@ -1,4 +1,4 @@
-"""Unit tests for the two-call online hypothesis-program pipeline."""
+"""Unit tests for hypothesis-conditioned completion-exemplar retrieval."""
 
 import json
 import os
@@ -12,48 +12,102 @@ SRC = os.path.join(ROOT, "src")
 if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
-from online_hypothesis_program.pipeline import run_online_hypothesis_program
-from online_hypothesis_program.runtime import (
-    execute_code_in_process,
-    execute_program_subprocess,
+from online_hypothesis_program.pipeline import (
+    _admit_valid_discovery_entries,
+    _normalize_discovery_contract,
+    _parse_discovery_response,
+    run_online_hypothesis_program,
 )
-from online_hypothesis_program.schemas import DISCOVERY_SCHEMA_VERSION
+from online_hypothesis_program.raw_workspace import build_dataset_workspace
+from online_hypothesis_program.renderer import (
+    _representative_user_contexts,
+    render_retrieval_evidence,
+)
+from online_hypothesis_program.runtime import (
+    compile_program_in_process,
+    execute_program_subprocess,
+    retrieve_in_process,
+    wrap_and_validate_result,
+)
+from online_hypothesis_program.schemas import (
+    DISCOVERY_SCHEMA_VERSION,
+    validate_discovery_result,
+    validate_online_program_source,
+)
+from online_hypothesis_program.source_api import DatasetSourceAPI
 
 
 PROGRAM_CODE = """
-def execute(partial_item_ids, source_api, candidate_budget, evidence_budget):
-    return {
-        "candidate_proposals": [],
-        "evidence_records": [],
-        "used_sources": ["bundle_item_history"],
-    }
+def retrieve(partial_item_ids, dataset_workspace, parameters, budget):
+    history = dataset_workspace["bundle_item_history"]
+    partial_set = set(partial_item_ids)
+    bundle_ids = []
+    for item_id in partial_item_ids:
+        for bundle_id in history["items_to_bundles"].get(item_id, ()):
+            if bundle_id not in bundle_ids:
+                bundle_ids.append(bundle_id)
+    counts = {}
+    first_bundle = {}
+    for bundle_id in bundle_ids:
+        for item_id in history["bundles_to_items"].get(bundle_id, ()):
+            if item_id not in partial_set:
+                counts[item_id] = counts.get(item_id, 0) + 1
+                first_bundle.setdefault(item_id, bundle_id)
+    ranked = sorted(counts, key=lambda item_id: (-counts[item_id], item_id))
+    result = []
+    for item_id in ranked[:budget["max_retrieved_items"]]:
+        result.append({
+            "item_id": item_id,
+            "provenance": [{
+                "source": "bundle_item_history",
+                "relation": "co-occurs in partial-conditioned historical bundles",
+                "supporting_context": {
+                    "item_ids": list(partial_item_ids),
+                    "bundle_ids": [first_bundle[item_id]],
+                    "user_ids": []
+                }
+            }]
+        })
+    return result
 """.strip()
 
 
-class FakeSourceAPI:
-    available_sources = ("bundle_item_history",)
-
-
 def discovery_response():
+    specifications = [
+        (
+            "P1",
+            (
+                "The partial bundle follows a coordinated composition and an "
+                "additional item should extend a recurring historical combination."
+            ),
+        ),
+        (
+            "P2",
+            (
+                "The partial bundle leaves a complementary role that may be filled "
+                "by items repeatedly observed around the same anchors."
+            ),
+        ),
+    ]
     return {
         "schema_version": DISCOVERY_SCHEMA_VERSION,
-        "hypotheses": [
-            {
-                "id": "H1",
-                "observed_cues": ["soft knit texture", "neutral color"],
-                "intent": "The bundle may form a soft coordinated layered outfit.",
-                "missing_role": "A complementary lower or outer layer.",
-            }
-        ],
         "programs": [
             {
-                "hypothesis_id": "H1",
-                "program_id": "P1",
-                "name": "LayeredContextSearch",
+                "id": program_id,
+                "hypothesis": hypothesis,
+                "strategy": {
+                    "reference": (
+                        "Build historical bundles reached from partial items."
+                    ),
+                    "retrieval": (
+                        "Rank non-partial corpus items by repeated co-occurrence."
+                    ),
+                },
                 "required_sources": ["bundle_item_history"],
-                "evidence_types": ["historical_bundle_context"],
+                "parameters": {},
                 "code": PROGRAM_CODE,
             }
+            for program_id, hypothesis in specifications
         ],
     }
 
@@ -63,44 +117,78 @@ def make_dataset(root):
     os.makedirs(data_dir, exist_ok=True)
     with open(os.path.join(data_dir, "count.json"), "w", encoding="utf-8") as handle:
         json.dump({"#B": 20, "#I": 6, "#U": 10}, handle)
-    item_info = {
-        "1": {"title": "cream knit top", "cate_id": "c1"},
-        "2": {"title": "soft neutral scarf", "cate_id": "c2"},
-        "3": {"title": "wide-leg wool trousers", "cate_id": "c3"},
-        "4": {"title": "sport sandals", "cate_id": "c4"},
-        "5": {"title": "layered wool cardigan", "cate_id": "c5"},
-    }
     with open(
         os.path.join(data_dir, "item_info.json"),
         "w",
         encoding="utf-8",
     ) as handle:
-        json.dump(item_info, handle)
+        json.dump(
+            {
+                "1": {"title": "cream knit top", "cate_id": "c1"},
+                "2": {"title": "soft neutral scarf", "cate_id": "c2"},
+                "3": {"title": "wide-leg wool trousers", "cate_id": "c3"},
+                "4": {"title": "sport sandals", "cate_id": "c4"},
+                "5": {"title": "layered wool cardigan", "cate_id": "c5"},
+            },
+            handle,
+        )
     with open(
         os.path.join(data_dir, "bi_train.txt"),
         "w",
         encoding="utf-8",
     ) as handle:
-        handle.write("10, 1, 2, 5\n")
+        handle.write("10, 1, 2, 3, 5\n")
     with open(
         os.path.join(data_dir, "ui_full.txt"),
         "w",
         encoding="utf-8",
     ) as handle:
-        handle.write("7, 1, 5\n")
+        handle.write("7, 1, 3, 5\n")
 
 
-class OnlineHypothesisProgramTest(unittest.IsolatedAsyncioTestCase):
-    async def test_two_calls_keep_llm1_candidate_blind_and_render_ids_out(self):
+def successful_execution(program):
+    return {
+        "status": "success",
+        "result": {
+            "schema_version": "completion_exemplar_retrieval_v2",
+            "program_id": program["id"],
+            "completion_hypothesis": program["hypothesis"],
+            "retrieved_items": [
+                {
+                    "item_id": 3,
+                    "provenance": [
+                        {
+                            "source": "bundle_item_history",
+                            "relation": "historically completes the partial anchors",
+                            "supporting_context": {
+                                "item_ids": [1, 2, 5],
+                                "bundle_ids": [10],
+                                "user_ids": [],
+                            },
+                        }
+                    ],
+                }
+            ],
+            "execution_trace": {
+                "required_sources": ["bundle_item_history"],
+                "max_retrieved_items": 5,
+                "max_supporting_contexts_per_item": 2,
+            },
+        },
+        "validation_issues": [],
+    }
+
+
+class OnlineHypothesisPipelineTest(unittest.IsolatedAsyncioTestCase):
+    async def test_two_calls_execute_each_retriever_once(self):
         with tempfile.TemporaryDirectory() as temporary:
             make_dataset(temporary)
             conf = {
                 "dataset": "pog_dense",
                 "data_path": temporary,
-                "online_hypothesis_max_count": 3,
-                "online_candidate_budget_per_hypothesis": 5,
-                "online_evidence_budget_per_hypothesis": 8,
-                "online_total_candidate_budget": 10,
+                "online_hypothesis_count": 2,
+                "online_retrieved_item_budget_per_hypothesis": 5,
+                "online_max_supporting_contexts_per_item": 2,
             }
             sample = {
                 "bundle_id": 99,
@@ -110,6 +198,7 @@ class OnlineHypothesisProgramTest(unittest.IsolatedAsyncioTestCase):
                 "true_option_char": "A",
             }
             prompts = []
+            executor_calls = []
 
             async def call_program(prompt, step_name):
                 prompts.append(("program", prompt, step_name))
@@ -120,39 +209,14 @@ class OnlineHypothesisProgramTest(unittest.IsolatedAsyncioTestCase):
                 return json.dumps(
                     {
                         "prediction": "A",
-                        "rationale": "The trousers best fit the layered composition.",
+                        "ranking": ["A", "B"],
+                        "rationale": "A matches the retrieved historical exemplar.",
                     }
                 )
 
             def executor(**kwargs):
-                return {
-                    "status": "success",
-                    "result": {
-                        "schema_version": "candidate_proposal_set_v1",
-                        "program_id": "P1",
-                        "hypothesis": "unused by renderer",
-                        "candidate_proposals": [
-                            {"item_id": 5, "evidence_refs": ["E1"]}
-                        ],
-                        "evidence_records": [
-                            {
-                                "evidence_id": "E1",
-                                "type": "historical_bundle_context",
-                                "source": "bundle_item_history",
-                                "anchor_item_ids": [1, 2],
-                                "related_item_ids": [5],
-                                "related_bundle_ids": [10],
-                                "attributes": {"score": 0.91},
-                            }
-                        ],
-                        "execution_trace": {
-                            "used_sources": ["bundle_item_history"],
-                            "candidate_budget": 5,
-                            "evidence_budget": 8,
-                        },
-                    },
-                    "validation_issues": [],
-                }
+                executor_calls.append(kwargs)
+                return successful_execution(kwargs["program"])
 
             result = await run_online_hypothesis_program(
                 sample,
@@ -163,160 +227,312 @@ class OnlineHypothesisProgramTest(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(len(prompts), 2)
-        llm1_prompt = prompts[0][1]
-        llm2_prompt = prompts[1][1]
+        self.assertEqual(len(executor_calls), 2)
+        for call in executor_calls:
+            self.assertNotIn("candidate_ids", call)
+            self.assertEqual(call["partial_item_ids"], [1, 2])
+            self.assertEqual(call["retrieved_item_budget"], 5)
+        llm1_prompt, llm2_prompt = prompts[0][1], prompts[1][1]
         self.assertIn("cream knit top", llm1_prompt)
+        self.assertIn('"item_id": 1', llm1_prompt)
+        self.assertIn('"item_id": 2', llm1_prompt)
         self.assertNotIn("wide-leg wool trousers", llm1_prompt)
         self.assertNotIn("sport sandals", llm1_prompt)
         self.assertNotIn('"answer_options"', llm1_prompt)
+        self.assertLess(
+            llm1_prompt.index("PARTIAL BUNDLE"),
+            llm1_prompt.index("Interpret the partial bundle"),
+        )
+        self.assertIn('"source_record_format"', llm1_prompt)
+        self.assertIn('"runtime_format"', llm1_prompt)
+        self.assertIn('"observed_field_schema"', llm1_prompt)
+        self.assertIn("bundle_id, item_id_1, item_id_2", llm1_prompt)
+        self.assertIn('"supporting_context"', llm1_prompt)
+        self.assertIn("max_supporting_contexts_per_item", llm1_prompt)
+        self.assertIn(
+            "Interpret the partial bundle in exactly 2 genuinely different ways.",
+            llm1_prompt,
+        )
+        self.assertIn("def retrieve(", llm1_prompt)
         self.assertIn("wide-leg wool trousers", llm2_prompt)
-        self.assertIn("layered wool cardigan", llm2_prompt)
-        self.assertNotIn('"item_id": 5', llm2_prompt)
-        self.assertNotIn("related_bundle_ids", llm2_prompt)
-        self.assertNotIn("0.91", llm2_prompt)
-        self.assertEqual(result["evaluation"]["llm_calls"], 2)
-        self.assertEqual(result["evaluation"]["prediction"], "A")
-        self.assertEqual(result["evaluation"]["prediction_hit"], 1)
+        self.assertIn('"matching_answer_options": [', llm2_prompt)
+        self.assertIn('"A"', llm2_prompt)
+        self.assertNotIn('"item_id": 3', llm2_prompt)
+        self.assertEqual(result["evaluation"]["gt_retrieved"], True)
+        self.assertEqual(result["evaluation"]["gt_retrieval_rank"], 1)
+        self.assertEqual(result["evaluation"]["program_count"], 2)
+        self.assertEqual(result["evaluation"]["proposed_program_count"], 2)
 
-    async def test_program_failure_still_calls_prediction(self):
+    async def test_invalid_discovery_still_calls_prediction(self):
         with tempfile.TemporaryDirectory() as temporary:
             make_dataset(temporary)
-            conf = {
-                "dataset": "pog_dense",
-                "data_path": temporary,
-                "online_hypothesis_max_count": 3,
-            }
+            conf = {"dataset": "pog_dense", "data_path": temporary}
             sample = {
-                "bundle_id": 100,
+                "bundle_id": 99,
                 "input_indices": [1, 2],
                 "candidate_indices": [3, 4],
-                "true_indice": 4,
-                "true_option_char": "B",
+                "true_indice": 3,
+                "true_option_char": "A",
             }
-            call_count = 0
+            calls = []
 
-            async def call_program(prompt, step_name):
-                nonlocal call_count
-                call_count += 1
-                return json.dumps(discovery_response())
+            async def bad_program(prompt, step_name):
+                calls.append(step_name)
+                return "{}"
 
-            async def call_prediction(prompt, step_name):
-                nonlocal call_count
-                call_count += 1
-                self.assertIn('"search_status": "execution_error"', prompt)
+            async def prediction(prompt, step_name):
+                calls.append(step_name)
                 return json.dumps(
                     {
                         "prediction": "B",
-                        "rationale": "Fallback comparison favors option B.",
+                        "ranking": ["B", "A"],
+                        "rationale": "No retrieved context was available.",
                     }
                 )
-
-            def executor(**kwargs):
-                return {
-                    "status": "execution_error",
-                    "result": None,
-                    "validation_issues": [],
-                }
 
             result = await run_online_hypothesis_program(
                 sample,
                 conf,
-                call_program,
-                call_prediction,
-                program_executor=executor,
+                bad_program,
+                prediction,
             )
 
-        self.assertEqual(call_count, 2)
-        self.assertEqual(result["evaluation"]["successful_program_count"], 0)
-        self.assertEqual(result["evaluation"]["prediction"], "B")
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(result["evaluation"]["program_count"], 0)
+        self.assertTrue(result["llm1"]["validation_issues"])
+        self.assertTrue(result["evaluation"]["valid_prediction"])
 
 
-class OnlineProgramRuntimeTest(unittest.TestCase):
-    def test_generated_code_executes_with_restricted_boundary(self):
-        result = execute_code_in_process(
-            PROGRAM_CODE,
-            source_api=FakeSourceAPI(),
+class RetrievalRuntimeTest(unittest.TestCase):
+    def test_generated_retriever_receives_budget_and_returns_items(self):
+        namespace = compile_program_in_process(PROGRAM_CODE)
+        workspace = {
+            "item_ids": tuple(range(6)),
+            "bundle_item_history": {
+                "items_to_bundles": {1: (10,), 2: (10,)},
+                "bundles_to_items": {10: (1, 2, 3, 5)},
+            },
+        }
+        result = retrieve_in_process(
+            namespace,
             partial_item_ids=[1, 2],
-            candidate_budget=5,
-            evidence_budget=8,
+            dataset_workspace=workspace,
+            parameters={},
+            retrieved_item_budget=1,
+            supporting_context_budget=2,
         )
-        self.assertEqual(result["candidate_proposals"], [])
-        self.assertEqual(result["used_sources"], ["bundle_item_history"])
+        self.assertEqual([item["item_id"] for item in result], [3])
 
-    def test_generated_code_executes_in_child_process_with_real_source_api(self):
-        code = """
-def execute(partial_item_ids, source_api, candidate_budget, evidence_budget):
-    bundle_map = source_api.get_bundles_for_items(partial_item_ids)
-    bundle_ids = []
-    for values in bundle_map.values():
-        bundle_ids.extend(values)
-    bundle_ids = list(dict.fromkeys(bundle_ids))[:evidence_budget]
-    item_map = source_api.get_items_for_bundles(bundle_ids)
-    partial = set(partial_item_ids)
-    records = []
-    proposals = []
-    for bundle_id in bundle_ids:
-        related = [
-            item_id
-            for item_id in item_map.get(bundle_id, [])
-            if item_id not in partial
+    def test_result_validator_rejects_partial_item(self):
+        discovery = discovery_response()
+        raw = [
+            {
+                "item_id": 1,
+                "provenance": [
+                    {
+                        "source": "bundle_item_history",
+                        "relation": "invalid self retrieval",
+                        "supporting_context": {
+                            "item_ids": [2],
+                            "bundle_ids": [10],
+                            "user_ids": [],
+                        },
+                    }
+                ],
+            }
         ]
-        if not related:
-            continue
-        evidence_id = "E" + str(len(records) + 1)
-        records.append({
-            "evidence_id": evidence_id,
-            "type": "historical_bundle_context",
-            "source": "bundle_item_history",
-            "anchor_item_ids": list(partial_item_ids),
-            "related_item_ids": related,
-            "related_bundle_ids": [bundle_id],
-            "attributes": {},
-        })
-        for item_id in related:
-            if len(proposals) >= candidate_budget:
-                break
-            if not any(value["item_id"] == item_id for value in proposals):
-                proposals.append({
-                    "item_id": item_id,
-                    "evidence_refs": [evidence_id],
-                })
-    return {
-        "candidate_proposals": proposals,
-        "evidence_records": records,
-        "used_sources": ["bundle_item_history"],
-    }
-""".strip()
+        _, issues = wrap_and_validate_result(
+            raw,
+            program=discovery["programs"][0],
+            partial_item_ids=[1, 2],
+            retrieved_item_budget=5,
+            supporting_context_budget=2,
+        )
+        self.assertIn(
+            "retrieved_items[0].item_id must exclude partial items",
+            issues,
+        )
+
+    def test_supporting_bundle_context_may_include_retrieved_item(self):
+        discovery = discovery_response()
+        raw = [
+            {
+                "item_id": 3,
+                "provenance": [
+                    {
+                        "source": "bundle_item_history",
+                        "relation": "member of the supporting historical bundle",
+                        "supporting_context": {
+                            "item_ids": [1, 2, 3, 5],
+                            "bundle_ids": [10],
+                            "user_ids": [],
+                        },
+                    }
+                ],
+            }
+        ]
+        _, issues = wrap_and_validate_result(
+            raw,
+            program=discovery["programs"][0],
+            partial_item_ids=[1, 2],
+            retrieved_item_budget=5,
+            supporting_context_budget=2,
+        )
+        self.assertEqual(issues, [])
+
+    def test_subprocess_executes_one_partial_only_retriever(self):
         with tempfile.TemporaryDirectory() as temporary:
             make_dataset(temporary)
-            execution = execute_program_subprocess(
-                program={
-                    "hypothesis_id": "H1",
-                    "program_id": "P1",
-                    "name": "HistoricalContextSearch",
-                    "required_sources": ["bundle_item_history"],
-                    "evidence_types": ["historical_bundle_context"],
-                    "code": code,
-                },
-                hypothesis={
-                    "id": "H1",
-                    "observed_cues": ["soft knit texture"],
-                    "intent": "The bundle may form a layered outfit.",
-                    "missing_role": "A complementary layer.",
-                },
+            discovery = discovery_response()
+            result = execute_program_subprocess(
+                program=discovery["programs"][0],
                 conf={
                     "dataset": "pog_dense",
                     "data_path": temporary,
                     "online_program_timeout_seconds": 10,
                 },
                 partial_item_ids=[1, 2],
-                candidate_budget=5,
-                evidence_budget=8,
+                retrieved_item_budget=2,
+                supporting_context_budget=1,
             )
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(
+            [item["item_id"] for item in result["result"]["retrieved_items"]],
+            [3, 5],
+        )
 
-        self.assertEqual(execution["status"], "success")
-        proposals = execution["result"]["candidate_proposals"]
-        self.assertEqual([proposal["item_id"] for proposal in proposals], [5])
+    def test_workspace_mappings_are_immutable(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            make_dataset(temporary)
+            workspace = build_dataset_workspace(
+                {"dataset": "pog_dense", "data_path": temporary},
+                allowed_sources=["bundle_item_history"],
+            )
+            with self.assertRaises(TypeError):
+                workspace["bundle_item_history"]["bundles_to_items"][10] = ()
+
+    def test_metadata_runtime_accepts_integer_and_numeric_string_lookup(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            make_dataset(temporary)
+            workspace = build_dataset_workspace(
+                {"dataset": "pog_dense", "data_path": temporary},
+                allowed_sources=["item_metadata"],
+            )
+            metadata = workspace["item_metadata"]
+            self.assertEqual(metadata.get(1), metadata.get("1"))
+            self.assertTrue(all(isinstance(key, int) for key in metadata))
+            with self.assertRaises(TypeError):
+                metadata[1] = {}
+
+
+class RetrievalSchemaAndRendererTest(unittest.TestCase):
+    def test_contract_normalization_removes_item_ids_source_declaration(self):
+        response = discovery_response()
+        response["programs"][0]["required_sources"].append("item_ids")
+        normalized, repairs = _normalize_discovery_contract(response)
+        self.assertEqual(
+            normalized["programs"][0]["required_sources"],
+            ["bundle_item_history"],
+        )
+        self.assertEqual(len(repairs), 1)
+        self.assertIn(
+            "item_ids",
+            response["programs"][0]["required_sources"],
+        )
+
+    def test_admission_keeps_valid_pair_when_another_program_is_invalid(self):
+        response = discovery_response()
+        response["programs"][1]["code"] = (
+            "def retrieve(partial_item_ids, dataset_workspace, parameters, budget):\n"
+            "    return []"
+        )
+        admitted, rejected = _admit_valid_discovery_entries(
+            response,
+            available_sources=["bundle_item_history"],
+        )
+        self.assertEqual(
+            [program["id"] for program in admitted["programs"]],
+            ["P1"],
+        )
+        self.assertEqual(rejected[0]["program_id"], "P2")
+        self.assertTrue(rejected[0]["validation_issues"])
+
+    def test_discovery_accepts_retrieve_contract(self):
+        issues = validate_discovery_result(
+            discovery_response(),
+            available_sources=[
+                "bundle_item_history",
+                "item_metadata",
+                "user_item_history",
+            ],
+        )
+        self.assertEqual(issues, [])
+
+    def test_source_validator_rejects_candidate_argument(self):
+        code = """
+def retrieve(partial_item_ids, candidate_id, dataset_workspace, parameters, budget):
+    return []
+""".strip()
+        issues = validate_online_program_source(code)
+        self.assertTrue(
+            any("retrieve arguments must be exactly" in issue for issue in issues)
+        )
+
+    def test_renderer_resolves_text_and_exact_option_overlap(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            make_dataset(temporary)
+            reader = DatasetSourceAPI(
+                {"dataset": "pog_dense", "data_path": temporary}
+            )
+            discovery = discovery_response()
+            executions = {
+                "P1": successful_execution(discovery["programs"][0]),
+                "P2": successful_execution(discovery["programs"][1]),
+            }
+            rendered = render_retrieval_evidence(
+                programs=discovery["programs"],
+                executions=executions,
+                source_api=reader,
+                answer_options=[
+                    {"label": "A", "item_id": 3},
+                    {"label": "B", "item_id": 4},
+                ],
+            )
+        exemplar = rendered["model_view"][0]["retrieved_exemplars"][0]
+        self.assertEqual(exemplar["item_text"], "wide-leg wool trousers")
+        self.assertEqual(exemplar["matching_answer_options"], ["A"])
+        self.assertIn(
+            "layered wool cardigan",
+            exemplar["provenance"][0]["related_item_texts"],
+        )
+        self.assertEqual(
+            rendered["retrieval_counts"]["unique_retrieved_item_count"],
+            1,
+        )
+
+    def test_user_provenance_context_is_readable(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            make_dataset(temporary)
+            reader = DatasetSourceAPI(
+                {"dataset": "pog_dense", "data_path": temporary}
+            )
+            contexts = _representative_user_contexts(
+                reader,
+                {
+                    "supporting_context": {
+                        "item_ids": [],
+                        "bundle_ids": [],
+                        "user_ids": [7],
+                    }
+                },
+            )
+        self.assertIn("wide-leg wool trousers", contexts[0])
+
+    def test_discovery_json_repair(self):
+        value = json.dumps(discovery_response(), indent=2)
+        parsed, repairs = _parse_discovery_response(value)
+        self.assertEqual(parsed["schema_version"], DISCOVERY_SCHEMA_VERSION)
+        self.assertEqual(repairs, [])
 
 
 if __name__ == "__main__":

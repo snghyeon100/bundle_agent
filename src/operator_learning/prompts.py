@@ -45,61 +45,81 @@ def _compact_item(item, dataset):
     return compact
 
 
-def candidate_blind_case_view(case, *, text_only=True):
-    """Return the only case fields permitted in the induction prompt."""
+def strategy_case_view(case):
+    """Expose partial and candidate identities while keeping the GT hidden."""
     dataset = case.get("dataset")
-    items = [
-        _compact_item(item, dataset)
-        for item in case.get("partial_items", [])
-        if isinstance(item, dict)
-    ]
-    if text_only:
-        items = [
-            {
-                field: item[field]
-                for field in ("text", "metadata")
-                if field in item
-            }
-            for item in items
-        ]
     return {
         "dataset": dataset,
-        "partial_items": items,
-        "source_diagnostics": case.get("source_diagnostics", {}),
+        "partial_items": [
+            _compact_item(item, dataset)
+            for item in case.get("partial_items", [])
+            if isinstance(item, dict)
+        ],
+        "candidate_items": [
+            {
+                "label": str(item.get("label") or ""),
+                **_compact_item(item, dataset),
+            }
+            for item in case.get("candidate_items", [])
+            if isinstance(item, dict)
+        ],
     }
 
 
-def _program_definition(case):
-    dataset_name = str(case.get("dataset") or "").lower()
-    fashion_semantics = (
-        "For fashion data, an outfit is a complementary composition of item roles, "
-        "not merely a set of similar or interchangeable items.\n\n"
-        if dataset_name in {"pog", "pog_dense"}
-        else ""
+def strategy_evidence_prediction_prompt(
+    *,
+    dataset,
+    partial_items,
+    candidate_items,
+    strategy_evidence,
+):
+    """Build a baseline-shaped final-ranking prompt with strategy evidence."""
+    name = str(dataset or "").lower()
+    if "spotify" in name:
+        task_name, bundle_name, item_name = (
+            "playlist continuation",
+            "music playlist",
+            "song",
+        )
+    else:
+        task_name, bundle_name, item_name = (
+            "bundle construction",
+            "fashion outfit",
+            "fashion item",
+        )
+    partial_text = "; ".join(
+        f"{index + 1}. {item.get('text', '')}"
+        for index, item in enumerate(partial_items)
+        if isinstance(item, dict)
+    )
+    option_text = "; ".join(
+        f"{item.get('label', '')}. {item.get('text', '')}"
+        for item in candidate_items
+        if isinstance(item, dict)
     )
     return (
-        "You are the Candidate-Program Discovery Agent for bundle completion.\n\n"
-        f"{task_semantics(case.get('dataset'))}\n\n"
-        f"{fashion_semantics}"
-        "PROGRAM DEFINITION\n"
-        "A macro operator is a reusable, hypothesis-conditioned candidate-retrieval "
-        "program. Given any partial bundle, it uses only permitted sources to retrieve "
-        "a small set of plausible missing-item IDs and source provenance for every "
-        "proposed item. It may contain several dependent lookup, traversal, aggregation, "
-        "normalization, filtering, and evidence-selection steps when they all implement "
-        "one completion hypothesis.\n\n"
-        "The program does not select the final answer, fuse unrelated hypotheses, expose "
-        "an opaque final relevance score as evidence, or dump an unbounded source context. "
-        "Numeric measures may be used internally to select a bounded evidence set. The "
-        "fixed runtime output is candidate proposals with source provenance.\n\n"
-        "GRANULARITY CALIBRATION\n"
-        "- Appropriate: retrieve a bounded candidate set under one stable completion "
-        "hypothesis and retain representative source records that explain each inclusion.\n"
-        "- Too atomic: load metadata, count a relation, compute one similarity, or sort IDs.\n"
-        "- Too broad: combine independent co-occurrence, category, embedding, popularity, "
-        "and semantic hypotheses into a final answer-selection strategy.\n"
-        "- A category/profile/intent inference is not sufficient by itself. The same macro "
-        "must project that inference back to concrete candidate item IDs.\n\n"
+        f"You are a helpful and honest assistant. The following is a multiple choice "
+        f"question about {task_name}. Rank all options from most to least plausible "
+        "using the item text and the supplied source-grounded strategy evidence.\n\n"
+        f"Question: Given the partial {bundle_name}: {partial_text}, which candidate "
+        f"{item_name} should be included into this {bundle_name}?\n"
+        f"Options: {option_text}\n\n"
+        "STRATEGY EVIDENCE\n"
+        f"{pretty_json(strategy_evidence)}\n\n"
+        "Each strategy describes an intent, how it constructs a shared reference "
+        "from the partial bundle, and the relation it applies to every candidate. "
+        "Use these descriptions to interpret the returned contexts. A context is "
+        "evidence, not a vote: more contexts do not automatically make a candidate "
+        "better. Context shared unchanged by all candidates is non-discriminative. "
+        "Missing context is not automatic contradiction.\n\n"
+        "Return JSON only. Include every option label exactly once in ranking, from "
+        "most to least plausible, and make prediction equal ranking[0]. Keep the "
+        "rationale to at most two sentences:\n"
+        "{\n"
+        '  "prediction": "top-ranked label",\n'
+        '  "ranking": ["all labels exactly once"],\n'
+        '  "rationale": "brief evidence-grounded comparison"\n'
+        "}"
     )
 
 
@@ -111,87 +131,150 @@ def induction_prompt(
     *,
     text_only=True,
 ):
-    prompt_case = candidate_blind_case_view(case, text_only=text_only)
+    del operator_memory, max_operator_count, text_only
+    prompt_case = strategy_case_view(case)
     return (
-        _program_definition(case)
-        + "DISCOVERY TASK\n"
-        "The case is candidate-blind. No answer options or ground truth are available. "
-        "First infer several short, sample-conditioned semantic completion hypotheses "
-        "from the observed partial items. A semantic completion hypothesis is a plausible "
-        "account of the bundle being assembled: the coherent style, occasion, function, "
-        "theme, or composition that could connect the observed items, and the complementary "
-        "contribution a missing item could make to that composition. Ground it in concrete "
-        "cues visible in the partial-item descriptions. It should explain why an unknown "
-        "item could belong in this bundle before deciding how any source will be searched. "
-        "Make the hypotheses meaningfully different interpretations of the case rather "
-        "than different procedures for the same interpretation.\n\n"
-        "Then generalize each case hypothesis one-to-one into a case-independent "
-        "candidate-retrieval program specification. The reusable program states how the "
-        "semantic completion principle can be operationalized with available evidence, "
-        "but it must not hard-code current item names, IDs, product types, or a presumed "
-        "answer.\n\n"
-        "SOURCE GROUNDING\n"
-        "Use source diagnostics only to determine which evidence procedure is feasible; "
-        "do not confuse source availability with semantic intent. Use only exact component "
-        "IDs from the source manifest. Every proposed candidate must be grounded in at "
-        "least one evidence record from a required source. The program code generated in "
-        "the next stage will receive only partial item IDs and a scoped SourceAPI.\n\n"
-        "Category IDs are opaque. They support equality, frequency, novelty, and "
-        "co-occurrence, but not named semantic roles unless the manifest supplies such a "
-        "taxonomy. Embeddings are opaque vectors. They support similarity and neighborhood "
-        "operations, but must not be decoded into named attributes. Item text may use "
-        "explicit lexical information but may not assume an unavailable classifier.\n\n"
-        "FIXED OUTPUT CONTRACT\n"
-        f'Every program has output_contract="{CANDIDATE_PROPOSAL_OUTPUT_CONTRACT}". '
-        "At runtime it must return bounded candidate item IDs plus source-grounded evidence "
-        "references for each candidate. Do not invent graph ports, intermediate operator "
-        "outputs, paths, workflows, or input/output entity contracts.\n\n"
-        "FORBIDDEN PREVIOUS PROGRAM SIGNATURES\n"
-        "The compact entries below are exclusion records for programs already proposed. "
-        "They are not examples, templates, or a verified online library. Do not reproduce, "
-        "rename, extend, specialize, or paraphrase a listed program principle. A program "
-        "is not new when only its metric, modality, parameter, or wording changes while "
-        "its hypothesis and source/evidence family remain the same. Return empty arrays "
-        "when this case supports no genuinely new executable program principle.\n\n"
-        f"{pretty_json(operator_memory)}\n\n"
+        "You are a Strategy Designer for bundle completion.\n\n"
+        f"{task_semantics(case.get('dataset'))}\n\n"
+        "GOAL\n"
+        "Do not choose the correct answer for the current case. Design exactly three "
+        "reusable computational strategies that distinguish candidates from a "
+        "bundle-completion perspective.\n\n"
+        "TASK\n"
+        "You are given:\n"
+        "1. an observed partial bundle,\n"
+        "2. candidate items to evaluate,\n"
+        "3. available dataset sources and their data types, and\n"
+        "4. source availability and partial-coverage diagnostics.\n\n"
+        "STRATEGY DESIGN\n"
+        "Exactly one candidate item is the actual missing item to add to the given "
+        "partial bundle, but its identity is not provided.\n\n"
+        "Let P be the partial bundle and let c1, ..., cn be the candidate items. For each "
+        "candidate ci, construct Bi = P union {ci} as a hypothetical completed bundle. "
+        "The Bi are competing completion hypotheses, not bundles that are all true at "
+        "the same time. Inspect {B1, ..., Bn} together and interpret each Bi as a whole "
+        "completed bundle. Do not compare ci with each partial item independently. "
+        "Consider the purpose, theme, usage, composition, and item relationships that "
+        "could make the whole Bi coherent.\n\n"
+        "Infer exactly three distinct and plausible completion intents for how the "
+        "observed partial bundle P could be completed. A completion intent is a coherent "
+        "explanation of the purpose, theme, usage, composition, or relation that could "
+        "make items belong to one bundle. An intent must not be a broad explanation that "
+        "fits every hypothetical bundle equally. It must create a meaningful contrast "
+        "under which some candidates are more natural completions than others.\n\n"
+        "Under each intent, identify the candidates that remain difficult to distinguish "
+        "from a bundle-completion perspective. Determine what shared evaluation basis "
+        "should be built from the partial bundle and sources, and what source-grounded "
+        "relation between each candidate and that basis would distinguish the ambiguous "
+        "candidates.\n\n"
+        "STRATEGY DEFINITION\n"
+        "A strategy is a reusable computation under one completion intent. It:\n"
+        "1. builds a shared evaluation basis from the partial bundle and available "
+        "sources,\n"
+        "2. applies the same computation to every candidate to examine the candidate's "
+        "bundle-completion relation to that basis, and\n"
+        "3. retrieves source-grounded textual contexts that reveal that relation.\n\n"
+        "This shared evaluation basis is called the reference. A reference is not the "
+        "correct candidate or any particular candidate. Within one strategy, construct "
+        "the reference once from the partial bundle and sources, then use the same "
+        "reference to evaluate every candidate. Pair each completion intent one-to-one "
+        "with exactly one strategy.\n\n"
+        "Each strategy returns a small, bounded set of contexts for every candidate. "
+        "Every final context must be either a related "
+        "item text or a historical bundle item-text composition retrieved from the "
+        "available sources. Numerical computations may be used internally to retrieve, "
+        "compare, and select representative contexts, but do not output numerical scores, "
+        "similarities, distances, counts, or diagnostic messages as contexts.\n\n"
+        "The three strategies must use meaningfully different computations. Distinguish "
+        "them through their reference construction, candidate relation, or evidence "
+        "route. Each pair must differ in at least two of these aspects. "
+        "Changing only wording, a metric, an embedding modality, a threshold, or a source "
+        "file is not a different strategy.\n\n"
+        "First complete all three strategy specifications. Choose them according to the "
+        "candidate ambiguities that need to be resolved, not according to implementation "
+        "convenience. Do not write any Python until all three specifications are complete. "
+        "After emitting the specifications, treat them as immutable: the programs must "
+        "implement them without replacing, simplifying, or omitting any declared "
+        "reference, relation, or evidence-route step.\n\n"
+        "Every returned context must be selected by actually applying the declared "
+        "candidate relation and must show a concrete connection between that candidate "
+        "and the shared reference. Do not return shared reference contexts selected "
+        "independently of the candidate; if no such context exists, return an empty "
+        "contexts list for that candidate. Do not invent a fallback or repeat the partial "
+        "or candidate text as substitute evidence.\n\n"
+        "Use only sources present in the manifest. Item IDs are lookup keys; do not "
+        "hard-code the IDs, labels, names, or presumed answer from this case. Write "
+        "complete executable Python code for each strategy.\n\n"
+        "INPUT CASE\n"
+        f"{pretty_json(prompt_case)}\n\n"
+        "SOURCE DIAGNOSTICS\n"
+        '"availability": "available" means that the source exists and can be read by '
+        "the program.\n\n"
+        '"partial_coverage" describes whether the current partial item IDs have direct '
+        "records or relations in that source:\n"
+        '- "full": every partial item has at least one direct source record or relation.\n'
+        '- "partial": only some partial items have a direct source record or relation.\n'
+        '- "none": no partial item has a direct source record or relation.\n\n'
+        f"{pretty_json(case.get('source_diagnostics', {}))}\n\n"
         "SOURCE MANIFEST\n"
         f"{pretty_json(source_capabilities)}\n\n"
-        "CANDIDATE-BLIND DISCOVERY CASE\n"
-        f"{pretty_json(prompt_case)}\n\n"
-        "For each case hypothesis, list 1 to 4 concise observed_cues taken from the "
-        "partial-item descriptions and keep statement to one sentence. Write 3 to 8 "
-        "concrete pseudocode steps. Each program must finish by returning concrete "
-        "candidate item IDs and representative provenance records within the runtime "
-        "budgets. evidence_types are short structural labels such as "
-        "historical_bundle_context, related_item_context, semantic_neighbor_context, or "
-        "category_profile_context; choose only types actually needed by the hypothesis.\n\n"
-        f"Return JSON only with between 0 and {int(max_operator_count)} hypotheses and "
-        "one-to-one programs:\n"
+        "PROGRAM CONTRACT\n"
+        "Each program must define this public entry point:\n"
+        "def run(partial_items, candidate_items, source_paths, "
+        "max_contexts_per_candidate=5):\n\n"
+        "partial_items contains the item_id, text, and metadata objects shown in the input "
+        "case. candidate_items additionally contains label. source_paths maps each exact "
+        "declared source ID to its local file path. Use source_paths rather than fixed "
+        "file paths, and declare every accessed source in required_sources.\n\n"
+        "The function must return one JSON-serializable result per candidate:\n"
+        "[\n"
+        "  {\n"
+        '    "label": "candidate label",\n'
+        '    "item_id": 0,\n'
+        '    "contexts": [\n'
+        "      {\n"
+        '        "text": "related item text or historical bundle item-text composition",\n'
+        '        "sources": ["one or more exact declared source IDs"],\n'
+        '        "supporting_item_ids": [],\n'
+        '        "supporting_bundle_ids": []\n'
+        "      }\n"
+        "    ]\n"
+        "  }\n"
+        "]\n\n"
+        "This is only an external contract, not an internal skeleton. The program may "
+        "freely choose its helper functions, reference representation, indexing, joint or "
+        "individual candidate comparison, multi-hop computation, and aggregation. The "
+        "code may use the Python standard library, NumPy, and PyTorch. It "
+        "must access only its declared required_sources and provide all imports and helper "
+        "functions. Every code path must be implemented; return no placeholders, demos, "
+        "or ellipses.\n\n"
+        "OUTPUT\n"
+        "Return JSON only. The strategy_specs array must appear before programs, and must "
+        "contain all three complete specifications before any Python code appears:\n"
         "{\n"
-        '  "hypotheses": [\n'
+        '  "strategy_specs": [\n'
         "    {\n"
-        '      "id": "H1",\n'
-        '      "observed_cues": ["a concrete semantic cue visible in the partial items"],\n'
-        '      "statement": "one sample-conditioned plausible completion hypothesis"\n'
+        '      "strategy_id": "S1",\n'
+        '      "intent": "one plausible interpretation of the completed bundle",\n'
+        '      "name": "ConcisePascalCaseName",\n'
+        '      "description": "candidate ambiguity resolved by this strategy",\n'
+        '      "reference_construction": "how the partial bundle and sources build one shared evaluation basis for all candidates",\n'
+        '      "candidate_relation": "the same relation evaluated between each candidate and the shared reference",\n'
+        '      "evidence_route": ["ordered source-grounded computation stages"],\n'
+        '      "required_sources": ["exact source ID from the manifest"],\n'
+        '      "pseudocode": ["ordered reusable computation steps"]\n'
         "    }\n"
         "  ],\n"
-        '  "operators": [\n'
+        '  "programs": [\n'
         "    {\n"
-        '      "hypothesis_id": "H1",\n'
-        '      "name": "ConcisePascalCaseName",\n'
-        '      "hypothesis": "case-independent reusable candidate-retrieval hypothesis",\n'
-        '      "required_sources": ["exact component ID"],\n'
-        '      "applicability": ["GT-independent condition under which this program is useful"],\n'
-        '      "evidence_types": ["structural evidence record type"],\n'
-        '      "pseudocode": [\n'
-        '        "retrieve hypothesis-relevant source records",\n'
-        '        "derive concrete candidate item IDs from those records",\n'
-        '        "select a bounded candidate set and representative provenance"\n'
-        "      ],\n"
-        f'      "output_contract": "{CANDIDATE_PROPOSAL_OUTPUT_CONTRACT}"\n'
+        '      "strategy_id": "S1",\n'
+        '      "code": "complete Python source implementing the exact S1 specification"\n'
         "    }\n"
         "  ]\n"
         "}\n\n"
+        "Use strategy IDs S1, S2, and S3 exactly once in each array. Both arrays must "
+        "contain exactly three entries, and each program must implement the specification "
+        "with the same strategy_id. "
         "Return no explanation outside the JSON object."
     )
 

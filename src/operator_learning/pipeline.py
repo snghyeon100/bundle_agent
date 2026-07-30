@@ -11,8 +11,6 @@ from code.workspace import build_source_manifest, prepare_workspace
 from dataset import BundleZeroShotDataset
 
 from .memory import (
-    compact_operator_memory,
-    count_exact_memory_matches,
     deduplicate_operator_pool,
 )
 from .prompts import (
@@ -33,6 +31,7 @@ from .schemas import (
     normalize_library,
     normalize_operator,
     resolve_induction_operators,
+    resolve_induction_strategies,
     validate_induction_result,
     validate_operator,
     validate_operator_library,
@@ -43,12 +42,15 @@ def _semantic_operator_view(operator):
     """Expose only reusable fields, never discovery-case identity."""
     if not isinstance(operator, dict):
         return operator
-    normalized = normalize_operator(operator)
-    return {
+    normalized = normalize_operator(operator, preserve_metadata=True)
+    view = {
         field: normalized[field]
         for field in OPERATOR_FIELDS
         if field in normalized
     }
+    if normalized.get("generated_code"):
+        view["generated_code"] = normalized["generated_code"]
+    return view
 
 
 def sample_validation_cases(conf, count, seed=None):
@@ -71,7 +73,7 @@ def sample_validation_cases(conf, count, seed=None):
 
 
 def build_discovery_case(sample, conf):
-    """Separate the candidate-blind prompt view from evaluator-only labels."""
+    """Build a strategy-design case while keeping the correct option hidden."""
     info_path = os.path.join(conf["data_path"], conf["dataset"], "item_info.json")
     with open(info_path, "r", encoding="utf-8") as handle:
         item_info = json.load(handle)
@@ -81,22 +83,20 @@ def build_discovery_case(sample, conf):
         _item_profile(item_id, item_info, conf["dataset"])
         for item_id in sample["input_indices"]
     ]
-    metadata_covered = sum(
-        bool(item.get("text") or item.get("metadata"))
-        for item in partial_items
-    )
+    candidate_items = [
+        {
+            "label": chr(ord("A") + index),
+            **_item_profile(item_id, item_info, conf["dataset"]),
+        }
+        for index, item_id in enumerate(sample.get("candidate_indices", []))
+    ]
     return {
         "case_id": f"bundle_{sample['bundle_id']}",
         "dataset": conf["dataset"],
         "bundle_id": int(sample["bundle_id"]),
         "partial_items": partial_items,
-        "source_diagnostics": {
-            "partial_item_count": len(partial_items),
-            "partial_metadata_coverage": {
-                "covered": metadata_covered,
-                "total": len(partial_items),
-            },
-        },
+        "candidate_items": candidate_items,
+        "source_diagnostics": {},
         "evaluation": {
             "ground_truth_item_id": gt_item_id,
             "ground_truth_profile": gt_profile,
@@ -328,52 +328,38 @@ def _build_diagnostic_indices(conf, available_sources):
     return indices
 
 
+def _coverage_label(covered, total):
+    if total <= 0 or covered <= 0:
+        return "none"
+    if covered >= total:
+        return "full"
+    return "partial"
+
+
 def _relation_diagnostics(partial_item_ids, index):
     item_to_anchors = index.get("item_to_anchors", {})
-    anchor_to_items = index.get("anchor_to_items", {})
-    anchors = []
     covered = 0
     partial_keys = {str(item_id) for item_id in partial_item_ids}
-    per_item_counts = []
     for item_id in partial_keys:
         related = item_to_anchors.get(item_id, [])
-        per_item_counts.append(len(related))
         if related:
             covered += 1
-            anchors.extend(related)
-    unique_anchors = list(dict.fromkeys(anchors))
-    retrievable_items = {
-        item_id
-        for anchor in unique_anchors
-        for item_id in anchor_to_items.get(anchor, [])
-        if item_id not in partial_keys
-    }
     return {
-        "covered_partial_items": covered,
-        "partial_item_count": len(partial_keys),
-        "related_record_count": len(unique_anchors),
-        "retrievable_non_partial_item_count": len(retrievable_items),
-        "mean_records_per_partial_item": (
-            sum(per_item_counts) / len(per_item_counts)
-            if per_item_counts
-            else 0.0
-        ),
+        "partial_coverage": _coverage_label(covered, len(partial_keys)),
     }
 
 
 def enrich_case_source_diagnostics(case, source_capabilities, diagnostic_indices):
-    """Attach only GT-independent, instance-level source statistics."""
-    diagnostics = dict(case.get("source_diagnostics", {}))
+    """Attach categorical, GT-independent source availability and coverage."""
     available = sorted(_capability_names(source_capabilities))
-    diagnostics["available_components"] = available
     partial_item_ids = [
         item.get("item_id")
         for item in case.get("partial_items", [])
         if isinstance(item, dict) and item.get("item_id") is not None
     ]
-    diagnostics["component_diagnostics"] = {}
+    diagnostics = {}
     for source_id in available:
-        source_view = {"available": True}
+        source_view = {"availability": "available"}
         if source_id in diagnostic_indices:
             source_view.update(
                 _relation_diagnostics(
@@ -381,15 +367,25 @@ def enrich_case_source_diagnostics(case, source_capabilities, diagnostic_indices
                     diagnostic_indices[source_id],
                 )
             )
-        diagnostics["component_diagnostics"][source_id] = source_view
+        elif source_id == "item_metadata":
+            covered = sum(
+                bool(item.get("text") or item.get("metadata"))
+                for item in case.get("partial_items", [])
+                if isinstance(item, dict)
+            )
+            source_view["partial_coverage"] = _coverage_label(
+                covered,
+                len(partial_item_ids),
+            )
+        diagnostics[source_id] = source_view
     case["source_diagnostics"] = diagnostics
     return case
 
 
 def _max_operators_per_case(conf, operators_per_case=None):
     maximum = int(operators_per_case or conf.get("operator_induction_count", 4))
-    if maximum < 1:
-        raise ValueError("operator_induction_count must be at least 1")
+    if maximum != 3:
+        raise ValueError("operator_induction_count must be exactly 3")
     return maximum
 
 
@@ -402,8 +398,11 @@ async def induce_raw_operators(
     initial_operator_memory=None,
     operators_per_case=None,
     trace_callback=None,
+    prompt_builder=None,
 ):
-    """Induce candidate-blind program specs in one LLM call per case."""
+    """Induce three reusable candidate-relation strategies per case."""
+    del initial_operator_memory
+    prompt_builder = prompt_builder or induction_prompt
     maximum = _max_operators_per_case(conf, operators_per_case)
     if not isinstance(source_capabilities, dict) or not source_capabilities.get(
         "components"
@@ -414,12 +413,6 @@ async def induce_raw_operators(
         conf,
         allowed_source_names,
     )
-    memory_limit = int(conf.get("operator_memory_max_size", 24))
-    operator_memory = compact_operator_memory(
-        initial_operator_memory or [],
-        max_size=memory_limit,
-    )
-
     raw_operators = []
     discovery_cases = []
     induction_traces = []
@@ -431,21 +424,20 @@ async def induce_raw_operators(
             diagnostic_indices,
         )
         discovery_cases.append(case)
-        prompt = induction_prompt(
+        prompt = prompt_builder(
             case,
             source_capabilities,
-            operator_memory,
+            [],
             maximum,
             text_only=bool(conf.get("operator_prompt_text_only", True)),
         )
-        step_name = f"candidate-blind program induction for {case['case_id']}"
+        step_name = f"candidate-relation strategy induction for {case['case_id']}"
         raw = await call_text(prompt, step_name)
         result = parse_json_from_text(raw)
         issues = (
             validate_induction_result(
                 result,
-                min_count=0,
-                max_count=maximum,
+                expected_count=maximum,
                 allowed_source_names=allowed_source_names,
             )
             if isinstance(result, dict)
@@ -456,43 +448,32 @@ async def induce_raw_operators(
             if isinstance(result, dict)
             else []
         )
-        if isinstance(result, dict):
-            exact_memory_matches = count_exact_memory_matches(
-                resolved_operators,
-                operator_memory,
-            )
-            if exact_memory_matches:
-                issues.append(
-                    "operators must not exactly duplicate previous operator memory"
-                )
         trace = {
             "case_id": case["case_id"],
             "prompt": prompt,
             "raw_response": raw,
             "parsed_response": result,
             "validation_issues": issues,
-            "operator_memory_before": operator_memory,
-            "operator_memory_after": operator_memory,
             "prompt_case": {
                 "dataset": case["dataset"],
                 "partial_items": case["partial_items"],
+                "candidate_items": case["candidate_items"],
                 "source_diagnostics": case["source_diagnostics"],
             },
             "evaluation": case["evaluation"],
-            "hypotheses": (
-                result.get("hypotheses", [])
+            "strategy_specs": (
+                result.get("strategy_specs", [])
                 if isinstance(result, dict)
                 else []
             ),
+            "programs": (
+                result.get("programs", [])
+                if isinstance(result, dict)
+                else []
+            ),
+            "strategies": resolve_induction_strategies(result),
             "operators": [],
         }
-        if issues:
-            if trace_callback:
-                trace_callback(trace)
-            raise ValueError(
-                f"invalid candidate-program induction for {case['case_id']}: "
-                + " | ".join(issues)
-            )
         case_operators = []
         for index, operator in enumerate(resolved_operators, start=1):
             enriched = _semantic_operator_view(operator)
@@ -501,11 +482,6 @@ async def induce_raw_operators(
             case_operators.append(enriched)
             raw_operators.append(enriched)
         trace["operators"] = case_operators
-        operator_memory = compact_operator_memory(
-            operator_memory + case_operators,
-            max_size=memory_limit,
-        )
-        trace["operator_memory_after"] = operator_memory
         induction_traces.append(trace)
         if trace_callback:
             trace_callback(trace)
@@ -520,8 +496,6 @@ async def induce_raw_operators(
         "discovery_cases": discovery_cases,
         "induction_traces": induction_traces,
         "raw_operators": raw_operators,
-        "operator_memory": operator_memory,
-        "operator_memory_max_size": memory_limit,
         "max_operators_per_case": maximum,
     }
 
@@ -851,7 +825,7 @@ def save_operator_artifacts(
     output_dir,
     discovery=None,
 ):
-    """Persist candidate-blind prompts, specs, dedup groups, and compiled code."""
+    """Persist strategy prompts, specs, dedup groups, and compiled code."""
     os.makedirs(output_dir, exist_ok=True)
     if discovery:
         _write_json(
@@ -860,10 +834,6 @@ def save_operator_artifacts(
         )
         _write_json(os.path.join(output_dir, "discovery_cases.json"), discovery["discovery_cases"])
         _write_json(os.path.join(output_dir, "raw_operators.json"), discovery["raw_operators"])
-        _write_json(
-            os.path.join(output_dir, "operator_memory.json"),
-            discovery["operator_memory"],
-        )
         _write_json(os.path.join(output_dir, "operator_library.json"), discovery["library"])
         _write_json(
             os.path.join(output_dir, "deduplication.json"),
@@ -882,8 +852,16 @@ def save_operator_artifacts(
                 trace["parsed_response"],
             )
             _write_json(
-                os.path.join(case_dir, "hypotheses.json"),
-                trace["hypotheses"],
+                os.path.join(case_dir, "strategy_specs.json"),
+                trace["strategy_specs"],
+            )
+            _write_json(
+                os.path.join(case_dir, "programs.json"),
+                trace["programs"],
+            )
+            _write_json(
+                os.path.join(case_dir, "strategies.json"),
+                trace["strategies"],
             )
             _write_json(
                 os.path.join(case_dir, "validation_issues.json"),
@@ -891,14 +869,6 @@ def save_operator_artifacts(
             )
             _write_json(os.path.join(case_dir, "prompt_case.json"), trace["prompt_case"])
             _write_json(os.path.join(case_dir, "evaluation.json"), trace["evaluation"])
-            _write_json(
-                os.path.join(case_dir, "operator_memory_before.json"),
-                trace["operator_memory_before"],
-            )
-            _write_json(
-                os.path.join(case_dir, "operator_memory_after.json"),
-                trace["operator_memory_after"],
-            )
             _write_json(os.path.join(case_dir, "operators.json"), trace["operators"])
         for trace in discovery["compilation_traces"]:
             name = str(trace["operator_name"])

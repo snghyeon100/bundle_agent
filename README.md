@@ -207,30 +207,46 @@ Initial retrieval metrics include:
 rejected registries. Unverified candidate memory is never treated as an online
 library.
 
-## Online-only dynamic alternative
+## Online hypothesis-conditioned exemplar-retrieval pilot
 
-`online_hypothesis_program` implements a separate two-call path that does not
-use an offline operator library:
+`online_hypothesis_program` implements a separate two-call path without an
+offline operator library:
 
 ```text
-partial bundle + source diagnostics
-  -> LLM1: semantic hypotheses + one case-conditioned Python program per hypothesis
-  -> timeout-bounded execution through a scoped, read-only SourceAPI
-  -> resolve raw source IDs into readable retrieved examples and contexts
-  -> LLM2: compare retrieved examples with the benchmark answer options
-  -> prediction
+partial-item text
+  -> LLM1: programs containing hypothesis + reference + retrieval strategy + code
+  -> hash and fix hypothesis/program/parameters/source scope/budget
+  -> runtime executes each retrieve() function once on the partial bundle
+  -> retrievers return bounded corpus item IDs with source provenance
+  -> runtime resolves IDs into readable hypothesis-specific exemplars
+  -> LLM2 receives the answer options and performs a full ranking
 ```
 
-LLM1 never receives benchmark candidates or ground truth. LLM2 receives the
-answer-option labels and text, but not raw retrieved item IDs, bundle/user IDs,
-or opaque retrieval scores. Failed programs are recorded and omitted without a
-repair call, preserving exactly two LLM calls per case.
+LLM1 receives only partial-item text and the raw workspace manifest; answer
+options remain hidden until retrieval is complete. Each hypothesis constructs a
+different reference context and retrieves a small set of plausible completion
+exemplars. The runtime verifies item and provenance references, renders related
+item/bundle/user text, and only then gives LLM2 the answer options. The pipeline
+uses exactly two LLM calls per case and reports Hit@1/3/5, MRR, GT rank,
+retrieval counts, answer-option overlap, and GT retrieval.
 
 ```powershell
 python tests/test_online_hypothesis_program.py `
   --config config_operator.yaml `
   --split test `
   --sample_idx 1
+```
+
+To inspect strategy induction separately from Python compilation and execution,
+run the code-free diagnostic below. It asks for exactly three distinct
+hypotheses and 3--8 stage macro pseudocode plans, then validates their source
+scope and structure.
+
+```powershell
+python tests/test_online_hypothesis_strategy.py `
+  --config config_operator.yaml `
+  --split test `
+  --sample_idx 19
 ```
 
 ## Direct plausible-set diagnostic

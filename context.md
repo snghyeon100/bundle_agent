@@ -1,392 +1,469 @@
-# Bundle Agent Context
+# Bundle Agent Research Context
 
-## Purpose
+## Current Research Direction
 
-`bundle_agent` is a zero-shot bundle completion workspace focused on the `src/code/` method:
+The current MVP studies train-free, LLM-designed strategies for multiple-choice
+bundle completion. The method is implemented under `src/operator_learning/`.
 
-```text
-Code generation -> Evidence execution -> Prediction
-```
+For a partial bundle \(P\) and candidate items \(c_1,\ldots,c_n\), exactly one
+candidate is the actual missing item. The method treats
+\(B_i=P\cup\{c_i\}\) as competing hypothetical completions and asks an LLM to
+design source-grounded strategies that distinguish these alternatives.
 
-For each bundle-completion instance, an LLM first generates executable Python code that retrieves source-grounded evidence from local dataset files. The generated evidence is then attached next to partial items and candidate items, and a prediction LLM chooses the final candidate label.
-
-Large local artifacts are intentionally not committed. The `datasets/`, `results/`, `results_baseline/`, `.env`, workspace caches, and Python cache directories are ignored by Git.
-
-## Repository Structure
-
-- `src/dataset.py`: loads BundleConstruction datasets, builds multiple-choice samples, and formats item text.
-- `src/main.py`: main entry point for the `src/code/` method.
-- `src/code/`: code-generation evidence pipeline, prompts, shared helpers, and workspace wrapper.
-- `src/main_baseline.py`: text-only baseline entry point for separate comparison runs.
-- `config_code.yaml`: configuration for the code method.
-- `config_baseline.yaml`: configuration for the text-only baseline.
-- `tests/stage_1_code_generation/run.py`: isolated Stage 1 code-generation test runner.
-- `tests/stage_2_prediction/run.py`: isolated Stage 2 prediction test runner using a saved Stage 1 directory.
-- `datasets/`: local BundleConstruction datasets and feature files.
-- `results/`: full code-method outputs.
-- `analysis/`: stage-specific test outputs.
-
-## Code Method
-
-The active methodology is implemented under `src/code/`.
-
-The pipeline has two conceptual stages:
-
-1. **Stage 1: Code Generation and Evidence Execution**
-   - The LLM receives the current bundle problem: partial item IDs/text, candidate item IDs/text, task description, and a source manifest.
-   - It generates executable Python code.
-   - The code runs in a prepared workspace with allowed local data files copied under `data/`.
-   - The code writes an `evidence.json` file with evidence for every partial item and every candidate item.
-   - There is no repair loop. If generated code fails or writes invalid evidence, the run prints failure and falls back to sparse placeholder evidence.
-
-2. **Stage 2: Prediction**
-   - The prediction LLM receives the original partial/candidate item text with evidence lines attached directly under each item block.
-   - It returns only one label, such as `A` through `J`.
-
-The intended separation is:
+The current end-to-end flow is:
 
 ```text
-Stage 1: retrieve compact factual evidence using executable code
-Stage 2: choose the final candidate using item text plus retrieved evidence
+partial bundle + candidate items + source diagnostics
+  -> LLM1: three completion intents
+           + three immutable strategy specifications
+           + three executable Python programs
+  -> guarded runtime: execute each program over every candidate
+  -> candidate-specific textual evidence contexts
+  -> LLM2: baseline-shaped multiple-choice prompt + strategy evidence
+  -> complete candidate ranking
 ```
 
-Stage 1 must not choose, rank, score, recommend, or reveal a final prediction.
+This is currently an online, per-sample experimental pipeline. An offline
+strategy pool and online selection/composition stage remain possible future
+extensions, but they are not part of the current end-to-end evaluation.
 
-## Stage 1 Evidence Schema
+## Method Identity
 
-Generated code must write JSON using the `code_evidence_v1` shape:
+The central object is not a graph path or a fixed base operator. It is a
+reusable relational strategy:
+
+```text
+strategy =
+    one plausible completion intent
+  + one shared reference constructed from the partial bundle and sources
+  + one candidate relation applied identically to every candidate
+  + one source-grounded textual evidence route
+```
+
+A strategy should answer:
+
+1. Under what coherent interpretation could this partial bundle be completed?
+2. What shared evaluation basis should be constructed from the partial bundle?
+3. What relation between an arbitrary candidate and that basis would
+   distinguish plausible from implausible completions?
+4. Which related item texts or historical bundle compositions make that
+   relation visible to the final prediction model?
+
+The reference is not a candidate and is not the answer. It is a common basis
+constructed once within a strategy and used to evaluate every candidate.
+
+## Why the Current Form Was Chosen
+
+Earlier experiments exposed several failure modes:
+
+- Candidate-blind retrieval often produced plausible corpus items that did not
+  overlap the benchmark answer options.
+- Direct partial-to-candidate checks often collapsed into shallow one-hop or
+  text-only comparisons.
+- Forcing numeric scores encouraged the prediction model to treat the largest
+  number as the answer without interpreting the underlying relation.
+- Restricting outputs to generic related texts could produce the same context
+  for every candidate.
+- Asking for executable code before fixing the strategy caused the intended
+  reasoning and the implementation to diverge.
+- A rigid helper or skeleton improved execution stability but narrowed strategy
+  diversity and encouraged template-like implementations.
+- Automatic fallbacks often replaced the declared strategy with a different,
+  weaker procedure and obscured whether the original strategy worked.
+
+The current design therefore:
+
+- exposes both the partial bundle and all answer candidates to LLM1;
+- hides the ground-truth identity;
+- fixes the strategy specification before presenting its code in the same LLM
+  response;
+- applies one declared candidate relation consistently to all candidates;
+- returns candidate-specific source context instead of an opaque final score;
+- permits free internal Python structure under a small external I/O contract;
+- returns an empty context list when the declared relation finds no evidence;
+- does not invent a fallback.
+
+## LLM1: Spec-First Strategy and Program Generation
+
+LLM1 receives:
+
+1. partial item IDs, text, and metadata;
+2. candidate labels, IDs, text, and metadata;
+3. available source components and exact formats;
+4. source diagnostics for the current partial bundle.
+
+The ground-truth label is never included.
+
+LLM1 must first complete exactly three strategy specifications and then provide
+exactly three Python programs in the same JSON response. Strategy IDs are
+`S1`, `S2`, and `S3`.
+
+Each specification contains:
 
 ```json
 {
-  "schema_version": "code_evidence_v1",
-  "strategies": [
-    {
-      "name": "strategy_name",
-      "relation_signal": "item -> source relation -> retrieved context",
-      "data_sources": ["bi_train.txt", "item_info.json"],
-      "description": "short strategy description"
-    }
-  ],
-  "partial_evidence": {
-    "partial_123": {
-      "item_id": 123,
-      "evidence": ["short source-grounded evidence string"]
-    }
-  },
-  "candidate_evidence": {
-    "A": {
-      "item_id": 456,
-      "evidence": ["short source-grounded evidence string"]
-    }
-  },
-  "policy_trace": {
-    "implemented_strategies": ["strategy name -> concrete relation path implemented"],
-    "skipped_strategies": ["strategy/view -> source or sparsity reason"],
-    "notes": ["short implementation or fallback note"]
-  }
+  "strategy_id": "S1",
+  "intent": "one plausible interpretation of the completed bundle",
+  "name": "ConcisePascalCaseName",
+  "description": "candidate ambiguity resolved by this strategy",
+  "reference_construction": "how one shared evaluation basis is built",
+  "candidate_relation": "the same relation applied to every candidate",
+  "evidence_route": ["ordered source-grounded stages"],
+  "required_sources": ["exact source IDs"],
+  "pseudocode": ["ordered reusable computation steps"]
 }
 ```
 
-The prompt gives one example strategy style:
+The `strategy_specs` array must appear before `programs`. This is a spec-first
+constraint within one LLM call: the model is told to finish all three strategy
+designs before writing code and then implement those specifications without
+replacing or simplifying them.
+
+The three strategies must differ meaningfully in at least two of:
+
+- reference construction;
+- candidate relation;
+- evidence route.
+
+Changing only wording, a metric, threshold, embedding modality, or source file
+does not count as a distinct strategy.
+
+## Source Diagnostics
+
+Each source component has an `availability` field and a
+`partial_coverage` field.
 
 ```text
-IB x BI co-bundle context:
-item -> train bundles -> co-occurring items/context
+availability = available
+  The source exists and can be read by the generated program.
+
+partial_coverage = full
+  Every current partial item has at least one direct record or relation.
+
+partial_coverage = partial
+  Only some current partial items have a direct record or relation.
+
+partial_coverage = none
+  No current partial item has a direct record or relation.
 ```
 
-This is only an example. The LLM is asked to inspect the source manifest and design at least two additional sample-adaptive strategies, for at least three strategies total.
+Diagnostics describe feasibility, not relevance or correctness. A strategy
+should not confuse an available source with a semantically appropriate source.
 
-## Available Source Signals
+Typical configured components are:
 
-Allowed source files are configured in `config_code.yaml`.
+- `dataset_statistics`;
+- `item_metadata`;
+- `bundle_item_history`;
+- `user_item_history`;
+- `item_content_embedding`;
+- `item_description_embedding`;
+- `user_collaborative_embedding`;
+- `bundle_collaborative_embedding`.
 
-Typical sources:
+The manifest provides the exact parsing and entity-alignment contract for each
+component. Generated programs may access only sources listed in their own
+`required_sources`.
 
-- `count.json`: dataset counts.
-- `item_info.json`: item text metadata. Category fields are redacted from the code-method source manifest and should not be used as evidence.
-- `bi_train.txt`: bundle-item train relations.
-- `ui_full.txt`: user-item interactions.
-- `content_feature.pt`: item content/image/audio feature tensor.
-- `description_feature.pt`: item text feature tensor.
-- `item_cf_feature.pt`: item collaborative feature tensor.
-- `{dataset}_LightGCN_bi_feature.pt`: BI LightGCN item feature tensor.
+## Generated Program Contract
 
-The source manifest is treated as a set of typed relation contracts, not as final answer hints.
+Every generated program defines:
 
-## Prediction Prompt Shape
-
-The prediction prompt uses block formatting.
-
-For `pog` and `pog_dense`:
-
-```text
-You are a helpful and honest assistant. The following are multiple choice questions about bundle construction.
-You should directly answer the question by choosing the letter of the correct option. Only provide the letter of your answer, without any explanation or mentioning the option content.
-Question: Given the partial fashion outfit below, which candidate fashion item should be included into this fashion outfit?
-Partial fashion outfit:
-1. {partial item text}
-Evidence: {partial evidence lines}
-
-Options:
-A. {candidate item text}
-Evidence: {candidate evidence lines}
-...
-Choice:
+```python
+def run(
+    partial_items,
+    candidate_items,
+    source_paths,
+    max_contexts_per_candidate=5,
+):
+    ...
 ```
 
-For `spotify` and `spotify_sparse`, task names change to playlist continuation, music playlist, and song.
+This is only an external contract. No internal retrieval helper, computation
+skeleton, vector helper, or fixed graph traversal is imposed. The program may
+choose its own helper functions, indexing, multi-hop computation, aggregation,
+and joint or individual candidate comparison.
 
-Spotify item text is formatted as:
-
-```text
-track_name - artist_name - album_name
-```
-
-Fashion item text uses the item title.
-
-## Output Layout
-
-`src/main.py` saves artifacts under:
-
-```text
-results/{dataset}/{timestamp}/bundle_{bundle_id}/stage1_code_generation/
-  input.txt
-  output.txt
-  code.py
-  evidence.json
-  execution_summary.json
-
-results/{dataset}/{timestamp}/bundle_{bundle_id}/stage2_prediction/
-  input.txt
-  output.txt
-  prediction.json
-  decision_case.json
-```
-
-The run-level CSV is saved as:
-
-```text
-results/{dataset}/{timestamp}/results.csv
-```
-
-During an interrupted run, partial rows are saved as:
-
-```text
-results/{dataset}/{timestamp}/results_partial.csv
-```
-
-Resume is supported with:
-
-```powershell
-python src\main.py --config config_code.yaml --resume results\{dataset}\{timestamp}\results_partial.csv
-```
-
-## Stage Test Outputs
-
-Stage-specific tests save outputs under `analysis/`.
-
-Stage 1:
-
-```text
-analysis/stage_1_code_generation/{dataset}/{code_generation_model}/bundle_{bundle_id}_{timestamp}/
-  input.txt
-  output.txt
-  code.py
-  evidence.json
-  execution_summary.json
-```
-
-Stage 2:
-
-```text
-analysis/stage_2_prediction/{dataset}/{prediction_model}/bundle_{bundle_id}_{timestamp}/
-  input.txt
-  output.txt
-  prediction.json
-  decision_case.json
-  evidence.json
-```
-
-Stage 2 can reuse a saved Stage 1 directory:
-
-```powershell
-python tests\stage_2_prediction\run.py --stage1_dir analysis\stage_1_code_generation\pog\gpt-4.1-mini\bundle_722_20260706_105433
-```
-
-## Retry and Stop Policy
-
-Config:
-
-```yaml
-max_retries: 5
-retry_wait_seconds: 30
-```
-
-Retryable errors include overloaded/service unavailable messages, temporary provider failures, connection errors, connection resets, and timeouts. Retry wait increases linearly by attempt.
-
-Quota or permission errors such as `403`, quota, resource exhausted, permission denied, or billing stop the run immediately. Completed rows remain saved in `results_partial.csv` for resume.
-
-## API Key Configuration
-
-Code method uses separate clients for Stage 1 and Stage 2:
-
-```yaml
-code_generation_provider: openai
-code_generation_model: gpt-4.1-mini
-code_generation_api_key_env: "DMLAB_KEY"
-
-code_prediction_provider: openai
-code_prediction_model: gpt-4.1-mini
-code_prediction_api_key_env: "DMLAB_KEY"
-```
-
-For OpenAI models, `openai_reasoning_effort` is sent only to models that support reasoning parameters. It should be left empty for models such as `gpt-4.1-mini`.
-
-## Reproducibility
-
-The sampled problems are deterministic when these settings and dataset files are unchanged:
-
-```yaml
-num_cans
-num_token
-toy_eval
-seed
-shuffle_seed
-dataset
-data_path
-```
-
-Candidate negatives are filtered against the full test-GT graph before `toy_eval` truncates the evaluated pairs. This matches the original candidate generation protocol and prevents the negative-candidate pool from changing with `toy_eval`.
-
-The exact LLM outputs can still vary slightly despite `temperature: 0.0` because provider-side generation is not guaranteed to be bit-for-bit deterministic.
-
-## Instance Diagnostics and Bundle Clustering
-
-A useful analysis direction is to treat each bundle-completion instance as having its own evidence topology across BI relations, UI relations, and multimodal feature spaces.
-
-Instead of only reporting overall accuracy, compute deterministic diagnostics for each bundle and cluster instances into source-topology types.
-
-Recommended diagnostics:
-
-- `source_coverage`: how many partial/candidate items are observed in each source.
-- `direct_relation_strength`: BI co-bundle counts and UI user-overlap counts between partial items and candidates.
-- `embedding_contrast`: candidate-to-partial similarity margins in content, description, CF, and LightGCN spaces.
-- `partial_bundle_coherence`: how tightly partial items connect to each other in relation or embedding space.
-- `source_agreement`: whether multiple sources point to the same top candidate.
-- `sparsity_profile`: whether the instance is relation-rich, embedding-driven, source-conflicting, low-contrast, or sparse.
-
-Example diagnostic row:
-
-```text
-bundle_id,
-bi_partial_coverage,
-bi_candidate_coverage,
-max_bi_relation,
-bi_margin,
-ui_partial_coverage,
-max_ui_relation,
-content_top_score,
-content_margin,
-description_top_score,
-description_margin,
-partial_content_cohesion,
-partial_description_cohesion,
-source_top_consensus,
-num_sources_with_signal,
-cluster_labels,
-prediction,
-gt_label,
-hit
-```
-
-Possible cluster labels:
-
-- `relation_rich`: BI/UI coverage is high and direct relation margins are strong.
-- `embedding_driven`: relational signals are weak but embedding contrast is strong.
-- `multi_source_agreement`: multiple sources identify the same likely candidate.
-- `source_conflict`: different sources point to different candidates.
-- `low_contrast_ambiguous`: candidates have similar evidence strength.
-- `sparse_hard`: most sources have weak or missing signals.
-- `partial_incoherent`: partial items are internally weakly connected.
-
-These labels can be multi-label. For example:
+The result contains exactly one row per candidate in the original order:
 
 ```json
-["embedding_driven", "source_conflict"]
+[
+  {
+    "label": "A",
+    "item_id": 123,
+    "contexts": [
+      {
+        "text": "related item text or historical bundle item-text composition",
+        "sources": ["bundle_item_history", "item_metadata"],
+        "supporting_item_ids": [10, 20],
+        "supporting_bundle_ids": [30]
+      }
+    ]
+  }
+]
 ```
 
-This enables analysis such as:
+Final context values must be:
 
-- Performance by instance type.
-- Whether code-method gains are larger on relation-rich or embedding-driven samples.
-- Whether generated strategy families align with deterministic bundle diagnostics.
-- Whether strategy-diagnostic alignment correlates with accuracy.
+- related item text; or
+- a historical bundle's item-text composition.
 
-The main research framing is:
+Programs may use scores, similarities, counts, and embeddings internally to
+retrieve and select contexts. These numeric values are not the final evidence
+shown to LLM2.
+
+Every returned context must result from the declared candidate relation and
+must concretely connect that candidate to the shared reference. A shared
+reference context selected independently of the candidate is invalid. When no
+such context exists, the candidate receives `contexts: []`.
+
+## Runtime
+
+Programs are executed in guarded, timeout-bounded subprocesses by:
+
+- `src/operator_learning/spec_first_runtime.py`;
+- `src/operator_learning/spec_first_worker.py`.
+
+The runtime:
+
+- checks generated code with the existing code guard;
+- scopes `source_paths` to the strategy's declared sources;
+- executes each strategy separately;
+- validates one result row per candidate;
+- validates candidate order and identity;
+- requires non-empty textual contexts and declared source IDs;
+- records failures without a repair LLM call.
+
+A sample can proceed when at least one of the three generated programs executes
+successfully. Failed programs are omitted from the evidence passed to LLM2.
+
+## LLM2: Baseline-Shaped Evidence-Grounded Ranking
+
+The current prediction prompt deliberately follows the text-only baseline
+shape. This makes the experimental difference easier to interpret:
 
 ```text
-Bundle completion instances are heterogeneous. Each instance has its own evidence topology across bundle-item, user-item, and multimodal similarity relations. Code generation acts as an instance-adaptive evidence compiler that selects and materializes relation paths suited to the current bundle.
+Text-only baseline:
+  partial-item text + candidate-option text
+  -> prediction
+
+Current method:
+  the same partial-item text + candidate-option text
+  + generated strategy evidence
+  -> full ranking
 ```
 
-## Strategy Auditing
+LLM2 receives:
 
-LLM-generated strategy names are not stable enough for direct statistics. The same relation path may be named in many ways, such as:
+- partial item text;
+- candidate labels and text;
+- each successful strategy's `intent`;
+- `reference_construction`;
+- `candidate_relation`;
+- candidate-specific contexts containing only `sources` and `text`.
+
+LLM2 does not receive:
+
+- generated Python code;
+- pseudocode;
+- strategy name or general description;
+- required-source declarations;
+- raw partial/candidate item IDs;
+- raw supporting item, bundle, or user IDs.
+
+The prompt states that:
+
+- a context is evidence, not a vote;
+- more contexts do not automatically make a candidate better;
+- context repeated unchanged for all candidates is non-discriminative;
+- missing context is not automatic contradiction.
+
+The required output is:
+
+```json
+{
+  "prediction": "top-ranked label",
+  "ranking": ["every candidate label exactly once"],
+  "rationale": "at most two evidence-grounded sentences"
+}
+```
+
+`prediction` must equal `ranking[0]`.
+
+## Current Code Map
 
 ```text
-ib_x_bi_cobundle_context
-bi_train_cooccurrence
-bundle_item_neighbor_retrieval
-train_bundle_item_expansion
+src/
+  main_baseline.py
+    Text-only, one-call, top-1 baseline.
+
+  main.py
+    Older src/code code-generation/evidence baseline.
+    It is not the current spec-first method entry point.
+
+  operator_learning/
+    prompts.py
+      LLM1 induction and LLM2 prediction prompts.
+    pipeline.py
+      Case construction, source manifest, and source diagnostics.
+    schemas.py
+      Strategy/program schemas and validation.
+    spec_first_runtime.py
+      Guarded program execution and context validation.
+    spec_first_worker.py
+      Subprocess worker.
+    spec_first_prediction.py
+      Joins strategy specs with runtime contexts and computes ranking metrics.
+
+tests/
+  test_operator_induction.py
+    LLM1-only generation inspection.
+
+  test_spec_first_operator_prediction.py
+    Prediction wiring over previously generated/executed strategies.
+
+  test_spec_first_operator_batch.py
+    Current end-to-end online MVP and primary evaluation entry point.
 ```
 
-Use rule-based canonicalization based on actual source and relation footprints.
+`src/online_hypothesis_program/` and
+`src/counterfactual_reinterpretation/` contain separate earlier experiments.
+They are not the active spec-first batch path.
 
-Recommended canonical families:
+## Running the Current MVP
 
-- `bi_cobundle`
-- `ui_user_relation`
-- `content_embedding`
-- `description_embedding`
-- `item_cf_embedding`
-- `bi_lightgcn_embedding`
-- `metadata_text`
-- `sparse_fallback`
-- `unknown`
+Inspect five LLM1 generations without batch prediction:
 
-Classification should use:
+```powershell
+python tests/test_operator_induction.py `
+  --config config_operator.yaml `
+  --sample_count 5 `
+  --output_dir tests/outputs/operators/strategy_inspection
+```
+
+Run one end-to-end sample:
+
+```powershell
+python tests/test_spec_first_operator_batch.py `
+  --config config_operator.yaml `
+  --split test `
+  --sample_idx 0
+```
+
+Run the comparable 250-sample evaluation:
+
+```powershell
+python tests/test_spec_first_operator_batch.py `
+  --config config_operator.yaml `
+  --split test `
+  --start_idx 0 `
+  --sample_count 250
+```
+
+Each valid sample normally uses exactly two LLM calls:
+
+1. intent/spec/code generation;
+2. evidence-grounded ranking.
+
+With 250 samples, the normal total is approximately 500 LLM calls, excluding
+provider-level retries.
+
+Resume an interrupted batch:
+
+```powershell
+python tests/test_spec_first_operator_batch.py `
+  --config config_operator.yaml `
+  --resume tests/outputs/spec_first_operator_batch/<run-directory> `
+  --split test `
+  --start_idx 0 `
+  --sample_count 250
+```
+
+Default outputs are written to:
 
 ```text
-strategies[].name
-strategies[].relation_signal
-strategies[].data_sources
-strategies[].description
-policy_trace.implemented_strategies
-partial_evidence.*.evidence
-candidate_evidence.*.evidence
+tests/outputs/spec_first_operator_batch/{dataset}_{timestamp}/
 ```
 
-The audit output can be stored as:
+The batch reports:
 
-```text
-analysis/strategy_audit/{dataset}/{run_id}/strategy_audit.csv
-```
+- valid sample count;
+- Hit@1, Hit@3, and Hit@5;
+- mean reciprocal rank;
+- mean ground-truth rank;
+- mean successful program count;
+- total LLM calls.
 
-Useful columns:
+## Deliberately Removed or Deferred Designs
 
-```text
-bundle_id,
-prediction,
-gt_label,
-hit,
-raw_strategy_names,
-canonical_families,
-uses_bi_cobundle,
-uses_ui_user_relation,
-uses_content_embedding,
-uses_description_embedding,
-uses_item_cf_embedding,
-uses_bi_lightgcn_embedding,
-uses_sparse_fallback,
-num_canonical_families
-```
+The current MVP does not use:
 
+- operator compatibility graphs;
+- deterministic graph paths;
+- graph-query tools;
+- manually defined atomic/base operators;
+- LLM clustering or deduplication in the online path;
+- candidate-blind exemplar retrieval as the final method;
+- a forced `prepare()`/`evaluate()` skeleton;
+- a fixed `SourceAPI` helper surface;
+- generated-code repair calls;
+- automatic fallback strategies;
+- numeric evidence as the final LLM2 context;
+- a planner module;
+- an evidence-summary LLM.
+
+These choices are not permanent claims. They reflect the present attempt to
+isolate whether an LLM can design diverse, executable, candidate-discriminative
+strategies without overly constraining the implementation.
+
+## Open Questions and Planned Ablations
+
+The next evaluation should separate four issues:
+
+1. **Strategy diversity**
+   - Do the three strategies actually differ in reference, candidate relation,
+     and evidence route?
+
+2. **Specification-to-code fidelity**
+   - Does each program implement the declared process, or does it collapse into
+     a simpler partial-only retrieval?
+
+3. **Candidate specificity**
+   - How often do all candidates receive identical contexts?
+   - How often does a strategy return no context for every candidate?
+
+4. **Code stability**
+   - What fraction of programs execute and satisfy the result contract?
+
+Useful ablations include:
+
+- text-only baseline versus strategy evidence;
+- one strategy versus three strategies;
+- raw contexts versus a lightweight evidence consolidator;
+- numeric-valued versus context-valued evidence;
+- source diagnostics present versus absent;
+- online strategy generation versus an offline validated pool followed by
+  online selection or composition.
+
+If an evidence consolidator is added, it should run once per sample, perform
+extractive deduplication and organization, preserve source text and identifiers,
+and never rank candidates or introduce new evidence.
+
+## Current Research Claim Boundary
+
+At this stage, the strongest defensible claim is not that generated programs
+already outperform trained bundle recommenders. The current contribution being
+tested is:
+
+> An LLM can design multiple completion-intent-conditioned, source-grounded
+> relational strategies, compile them into executable programs, and use their
+> candidate-specific contexts to reinterpret ambiguous bundle-completion
+> options without task-specific training.
+
+Whether this becomes a publishable method depends on demonstrating:
+
+- measurable gains over the matched text-only baseline;
+- real strategy diversity beyond prompt-level paraphrases;
+- high spec-to-code fidelity and execution success;
+- robustness on sparse as well as dense bundle data;
+- ablations showing which parts of the design produce the gains.

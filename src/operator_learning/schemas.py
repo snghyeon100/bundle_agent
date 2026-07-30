@@ -18,12 +18,27 @@ OPERATOR_FIELDS = (
     "pseudocode",
     "output_contract",
 )
-INDUCTION_HYPOTHESIS_FIELDS = ("id", "observed_cues", "statement")
+INDUCTION_STRATEGY_SPEC_FIELDS = (
+    "strategy_id",
+    "intent",
+    "name",
+    "description",
+    "reference_construction",
+    "candidate_relation",
+    "evidence_route",
+    "required_sources",
+    "pseudocode",
+)
+INDUCTION_PROGRAM_FIELDS = (
+    "strategy_id",
+    "code",
+)
 OPERATOR_METADATA_FIELDS = (
     "operator_id",
     "origin_case_id",
     "member_operator_ids",
     "origin_case_ids",
+    "generated_code",
 )
 
 
@@ -172,126 +187,161 @@ def validate_induction_result(
     min_count=None,
     max_count=None,
 ):
-    """Validate one candidate-blind hypothesis/operator induction response."""
+    """Validate one spec-first, single-call strategy and program response."""
     if not isinstance(value, dict):
         return ["induction result must be an object"]
-    if set(value) != {"hypotheses", "operators"}:
-        return ["induction result must contain exactly hypotheses and operators"]
-    hypotheses = value.get("hypotheses")
-    operators = value.get("operators")
-    if not isinstance(hypotheses, list):
-        return ["hypotheses must be a list"]
-    if not isinstance(operators, list):
-        return ["operators must be a list"]
+    if set(value) != {"strategy_specs", "programs"}:
+        return [
+            "induction result must contain exactly strategy_specs and programs"
+        ]
+    strategy_specs = value.get("strategy_specs")
+    programs = value.get("programs")
+    if not isinstance(strategy_specs, list):
+        return ["strategy_specs must be a list"]
+    if not isinstance(programs, list):
+        return ["programs must be a list"]
 
     issues = []
-    if len(hypotheses) != len(operators):
-        issues.append("hypotheses and operators must have a one-to-one correspondence")
-    if expected_count is not None and len(operators) != int(expected_count):
-        issues.append(f"expected exactly {int(expected_count)} operators")
-    if min_count is not None and len(operators) < int(min_count):
-        issues.append(f"expected at least {int(min_count)} operators")
-    if max_count is not None and len(operators) > int(max_count):
-        issues.append(f"expected at most {int(max_count)} operators")
+    if expected_count is not None and len(strategy_specs) != int(expected_count):
+        issues.append(f"expected exactly {int(expected_count)} strategy_specs")
+    if expected_count is not None and len(programs) != int(expected_count):
+        issues.append(f"expected exactly {int(expected_count)} programs")
+    if min_count is not None and len(strategy_specs) < int(min_count):
+        issues.append(f"expected at least {int(min_count)} strategy_specs")
+    if max_count is not None and len(strategy_specs) > int(max_count):
+        issues.append(f"expected at most {int(max_count)} strategy_specs")
 
-    hypothesis_by_id = {}
-    for index, hypothesis in enumerate(hypotheses):
-        prefix = f"hypotheses[{index}]"
-        if not isinstance(hypothesis, dict):
+    names = []
+    strategy_ids = []
+    allowed = set(allowed_source_names or [])
+    for index, strategy in enumerate(strategy_specs):
+        prefix = f"strategy_specs[{index}]"
+        if not isinstance(strategy, dict):
             issues.append(f"{prefix} must be an object")
             continue
-        if set(hypothesis) != set(INDUCTION_HYPOTHESIS_FIELDS):
+        if set(strategy) != set(INDUCTION_STRATEGY_SPEC_FIELDS):
             issues.append(
-                f"{prefix} must contain exactly id, observed_cues, and statement"
+                f"{prefix} must contain exactly strategy_id, intent, name, "
+                "description, reference_construction, candidate_relation, "
+                "evidence_route, required_sources, and pseudocode"
             )
-        hypothesis_id = hypothesis.get("id")
-        observed_cues = hypothesis.get("observed_cues")
-        statement = hypothesis.get("statement")
-        if not _non_empty_string(hypothesis_id):
-            issues.append(f"{prefix}.id must be a non-empty string")
-        elif hypothesis_id in hypothesis_by_id:
-            issues.append(f"{prefix}.id must be unique")
-        if not _non_empty_string(statement):
-            issues.append(f"{prefix}.statement must be a non-empty string")
-        if not _string_list(observed_cues):
-            issues.append(f"{prefix}.observed_cues must be a non-empty string list")
-        elif not 1 <= len(observed_cues) <= 4:
-            issues.append(f"{prefix}.observed_cues must contain 1 to 4 cues")
-        elif len(observed_cues) != len(set(observed_cues)):
-            issues.append(f"{prefix}.observed_cues values must be unique")
-        if _non_empty_string(hypothesis_id):
-            hypothesis_by_id[hypothesis_id] = statement
-
-    used_hypothesis_ids = []
-    for index, operator in enumerate(operators):
-        if not isinstance(operator, dict):
-            issues.append(f"operators[{index}]: operator must be an object")
-            continue
-        hypothesis_id = operator.get("hypothesis_id")
-        if not _non_empty_string(hypothesis_id):
-            issues.append(
-                f"operators[{index}].hypothesis_id must be a non-empty string"
-            )
-            continue
-        used_hypothesis_ids.append(hypothesis_id)
-        if hypothesis_id not in hypothesis_by_id:
-            issues.append(
-                f"operators[{index}].hypothesis_id must reference hypotheses"
-            )
-            continue
-        resolved = {
-            key: deepcopy(item)
-            for key, item in operator.items()
-            if key != "hypothesis_id"
-        }
-        issues.extend(
-            f"operators[{index}]: {issue}"
-            for issue in validate_operator(
-                resolved,
-                allowed_source_names=allowed_source_names,
-            )
-        )
-
-    if len(used_hypothesis_ids) != len(set(used_hypothesis_ids)):
-        issues.append("each hypothesis may be used by exactly one operator")
-    unused = sorted(set(hypothesis_by_id) - set(used_hypothesis_ids))
-    if unused:
-        issues.append(
-            "every hypothesis must map to one operator: " + ", ".join(unused)
-        )
-
-    names = [
-        operator.get("name")
-        for operator in operators
-        if isinstance(operator, dict) and _non_empty_string(operator.get("name"))
-    ]
+        strategy_id = strategy.get("strategy_id")
+        if not _non_empty_string(strategy_id):
+            issues.append(f"{prefix}.strategy_id must be a non-empty string")
+        else:
+            strategy_ids.append(strategy_id)
+        name = strategy.get("name")
+        if not _non_empty_string(name):
+            issues.append(f"{prefix}.name must be a non-empty string")
+        elif not re.fullmatch(r"[A-Za-z][A-Za-z0-9]*", name):
+            issues.append(f"{prefix}.name must be an alphanumeric PascalCase name")
+        else:
+            names.append(name)
+        for field in (
+            "description",
+            "intent",
+            "reference_construction",
+            "candidate_relation",
+        ):
+            if not _non_empty_string(strategy.get(field)):
+                issues.append(f"{prefix}.{field} must be a non-empty string")
+        for field in ("evidence_route", "pseudocode"):
+            if not _string_list(strategy.get(field)):
+                issues.append(f"{prefix}.{field} must be a non-empty string list")
+        sources = strategy.get("required_sources")
+        if not _string_list(sources):
+            issues.append(f"{prefix}.required_sources must be a non-empty string list")
+        elif len(sources) != len(set(sources)):
+            issues.append(f"{prefix}.required_sources values must be unique")
+        elif allowed:
+            unknown = sorted(set(sources) - allowed)
+            if unknown:
+                issues.append(
+                    f"{prefix}.required_sources contains unavailable components: "
+                    + ", ".join(unknown)
+                )
     if len(names) != len(set(names)):
-        issues.append("operator names must be unique within a case")
+        issues.append("strategy names must be unique within a case")
+    if len(strategy_ids) != len(set(strategy_ids)):
+        issues.append("strategy_ids must be unique within strategy_specs")
+
+    program_ids = []
+    for index, program in enumerate(programs):
+        prefix = f"programs[{index}]"
+        if not isinstance(program, dict):
+            issues.append(f"{prefix} must be an object")
+            continue
+        if set(program) != set(INDUCTION_PROGRAM_FIELDS):
+            issues.append(f"{prefix} must contain exactly strategy_id and code")
+        strategy_id = program.get("strategy_id")
+        if not _non_empty_string(strategy_id):
+            issues.append(f"{prefix}.strategy_id must be a non-empty string")
+        else:
+            program_ids.append(strategy_id)
+        if not _non_empty_string(program.get("code")):
+            issues.append(f"{prefix}.code must be a non-empty string")
+    if len(program_ids) != len(set(program_ids)):
+        issues.append("strategy_ids must be unique within programs")
+    if set(strategy_ids) != set(program_ids):
+        issues.append(
+            "program strategy_ids must match strategy_specs strategy_ids one-to-one"
+        )
     return issues
 
 
-def resolve_induction_operators(value):
-    """Attach each case hypothesis to its reusable candidate-program spec."""
+def resolve_induction_strategies(value):
+    """Join spec-first strategies and programs by immutable strategy_id."""
     if not isinstance(value, dict):
         return []
-    hypothesis_by_id = {
-        hypothesis.get("id"): hypothesis.get("statement")
-        for hypothesis in value.get("hypotheses", [])
-        if isinstance(hypothesis, dict)
+    programs = {
+        program.get("strategy_id"): program.get("code")
+        for program in value.get("programs", [])
+        if isinstance(program, dict)
+        and _non_empty_string(program.get("strategy_id"))
     }
     resolved = []
-    for operator in value.get("operators", []):
-        if not isinstance(operator, dict):
+    for strategy in value.get("strategy_specs", []):
+        if not isinstance(strategy, dict):
             continue
-        hypothesis_id = operator.get("hypothesis_id")
+        strategy_id = strategy.get("strategy_id")
+        merged = deepcopy(strategy)
+        merged["code"] = str(programs.get(strategy_id) or "")
+        resolved.append(merged)
+    return resolved
+
+
+def resolve_induction_operators(value):
+    """Map spec-first strategies to the existing operator-library representation."""
+    resolved = []
+    for strategy in resolve_induction_strategies(value):
+        intent = str(strategy.get("intent") or "").strip()
+        description = str(strategy.get("description") or "").strip()
+        reference = str(strategy.get("reference_construction") or "").strip()
+        relation = str(strategy.get("candidate_relation") or "").strip()
+        evidence_route = " -> ".join(strategy.get("evidence_route", []))
+        hypothesis = "\n".join(
+            line
+            for line in (
+                f"Intent: {intent}" if intent else "",
+                f"Strategy: {description}" if description else "",
+                f"Reference: {reference}" if reference else "",
+                f"Candidate relation: {relation}" if relation else "",
+                f"Evidence route: {evidence_route}" if evidence_route else "",
+            )
+            if line
+        )
         standalone = {
-            key: deepcopy(item)
-            for key, item in operator.items()
-            if key != "hypothesis_id"
+            "name": strategy.get("name"),
+            "hypothesis": hypothesis,
+            "required_sources": deepcopy(strategy.get("required_sources", [])),
+            "applicability": [],
+            "evidence_types": ["textual_evidence_context"],
+            "pseudocode": deepcopy(strategy.get("pseudocode", [])),
+            "output_contract": CANDIDATE_PROPOSAL_OUTPUT_CONTRACT,
         }
-        if not _non_empty_string(standalone.get("hypothesis")):
-            standalone["hypothesis"] = hypothesis_by_id.get(hypothesis_id, "")
-        resolved.append(normalize_operator(standalone))
+        normalized = normalize_operator(standalone)
+        normalized["generated_code"] = str(strategy.get("code") or "")
+        resolved.append(normalized)
     return resolved
 
 

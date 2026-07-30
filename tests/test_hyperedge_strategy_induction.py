@@ -1,8 +1,10 @@
-"""Extract reusable candidate-relation strategies with one LLM call per case.
+"""Generate three hyperedge-only spec-first strategies per validation case.
 
 Usage:
-    python tests/test_operator_induction.py --config config_operator.yaml
-    python tests/test_operator_induction.py --config config_operator.yaml --sample_count 3
+    python tests/test_hyperedge_strategy_induction.py \
+        --config config_operator.yaml \
+        --sample_count 5 \
+        --output_dir tests/outputs/hyperedge_strategies/prompt_test
 """
 
 import argparse
@@ -22,6 +24,7 @@ if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
 from dataset import set_seed
+from hyperedge_strategy.prompts import induction_prompt as hyperedge_induction_prompt
 from main import (
     create_llm_client,
     default_api_key_envs_for_provider,
@@ -54,14 +57,22 @@ def _build_client(conf):
     model = stage_model(conf, "code_generation")
     api_key, env = resolve_api_key_from_keys(
         conf,
-        ["operator_api_key_env", "code_generation_api_key_env", "code_api_key_env"],
+        [
+            "operator_api_key_env",
+            "code_generation_api_key_env",
+            "code_api_key_env",
+        ],
         default_api_key_envs_for_provider(provider),
     )
     return {
         "client": create_llm_client(provider, api_key),
         "provider": provider,
         "model": model,
-    }, {"provider": provider, "model": model, "api_key_env": env}
+    }, {
+        "provider": provider,
+        "model": model,
+        "api_key_env": env,
+    }
 
 
 async def _run(args):
@@ -69,7 +80,6 @@ async def _run(args):
         conf = yaml.safe_load(handle)
     set_seed(int(conf.get("seed", 45)))
     sample_count = int(args.sample_count or conf.get("operator_discovery_count", 5))
-    operators_per_sample = int(conf.get("operator_induction_count", 4))
     samples = sample_validation_cases(conf, sample_count)
     _, _, source_manifest = build_operator_capability_manifest(conf)
     client, resolved = _build_client(conf)
@@ -81,7 +91,7 @@ async def _run(args):
             ROOT,
             "tests",
             "outputs",
-            "operators",
+            "hyperedge_strategies",
             f"{conf['dataset']}_{timestamp}",
         )
     )
@@ -89,18 +99,15 @@ async def _run(args):
     _write_json(
         os.path.join(output_dir, "run.json"),
         {
-            "phase": "operator_induction",
+            "phase": "hyperedge_strategy_induction",
             "dataset": conf["dataset"],
-            "discovery_source": "bi_valid_input.txt",
-            "evaluator_only_source": "bi_valid_gt.txt",
             "sample_count": sample_count,
-            "max_operators_per_sample": operators_per_sample,
+            "strategies_per_sample": 3,
             "llm_calls_per_sample": 1,
             "code_generation_in_same_call": True,
-            "running_operator_memory_used": False,
             "ground_truth_used_in_prompt": False,
             "candidate_options_used_in_prompt": True,
-            "source_manifest_used": True,
+            "all_strategies_hyperedge_conditioned": True,
             "source_component_ids": [
                 component["id"]
                 for component in source_manifest.get("components", [])
@@ -109,10 +116,7 @@ async def _run(args):
             **resolved,
         },
     )
-    _write_json(
-        os.path.join(output_dir, "source_manifest.json"),
-        source_manifest,
-    )
+    _write_json(os.path.join(output_dir, "source_manifest.json"), source_manifest)
 
     async def call_text(prompt, step_name):
         return await generate_content_with_retry(
@@ -120,7 +124,7 @@ async def _run(args):
             resolved["model"],
             prompt,
             conf,
-            int(conf.get("operator_max_output_tokens", 12000)),
+            int(conf.get("operator_max_output_tokens", 15000)),
             step_name,
         )
 
@@ -128,10 +132,22 @@ async def _run(args):
         case_dir = os.path.join(output_dir, "cases", trace["case_id"])
         _write_text(os.path.join(case_dir, "input.txt"), trace["prompt"])
         _write_text(os.path.join(case_dir, "output.txt"), trace["raw_response"])
-        _write_json(os.path.join(case_dir, "parsed_response.json"), trace["parsed_response"])
-        _write_json(os.path.join(case_dir, "validation_issues.json"), trace["validation_issues"])
-        _write_json(os.path.join(case_dir, "prompt_case.json"), trace["prompt_case"])
-        _write_json(os.path.join(case_dir, "evaluation.json"), trace["evaluation"])
+        _write_json(
+            os.path.join(case_dir, "parsed_response.json"),
+            trace["parsed_response"],
+        )
+        _write_json(
+            os.path.join(case_dir, "validation_issues.json"),
+            trace["validation_issues"],
+        )
+        _write_json(
+            os.path.join(case_dir, "prompt_case.json"),
+            trace["prompt_case"],
+        )
+        _write_json(
+            os.path.join(case_dir, "evaluation.json"),
+            trace["evaluation"],
+        )
         _write_json(
             os.path.join(case_dir, "strategy_specs.json"),
             trace["strategy_specs"],
@@ -145,9 +161,8 @@ async def _run(args):
             trace["strategies"],
         )
         for index, strategy in enumerate(trace["strategies"], start=1):
-            if not isinstance(strategy, dict) or not isinstance(
-                strategy.get("code"), str
-            ):
+            code = strategy.get("code") if isinstance(strategy, dict) else None
+            if not isinstance(code, str):
                 continue
             safe_name = re.sub(
                 r"[^A-Za-z0-9_-]+",
@@ -160,14 +175,14 @@ async def _run(args):
                     "programs",
                     f"{index:02d}_{safe_name or f'strategy_{index}'}.py",
                 ),
-                strategy["code"],
+                code,
             )
-        _write_json(os.path.join(case_dir, "operators.json"), trace["operators"])
 
     print(f">>> Dataset: {conf['dataset']}")
-    print(">>> Strategy prompt: partial bundle + candidate items; GT identity hidden")
+    print(">>> Prompt variant: three higher-order hyperedge strategies")
+    print(">>> Case: partial bundle + candidate items; GT identity hidden")
     print(f">>> Samples: {sample_count}")
-    print(f">>> Strategies per sample: {operators_per_sample}")
+    print(">>> Strategies per sample: 3")
     print(">>> Induction: one spec-first strategy + Python code LLM call per sample")
     print(
         ">>> Source components: "
@@ -181,36 +196,28 @@ async def _run(args):
         conf,
         call_text,
         source_capabilities=source_manifest,
+        operators_per_case=3,
         trace_callback=save_trace,
+        prompt_builder=hyperedge_induction_prompt,
     )
-    _write_json(os.path.join(output_dir, "validation_samples.json"), result["discovery_cases"])
-    _write_json(os.path.join(output_dir, "operator_pool.json"), result["raw_operators"])
+    _write_json(
+        os.path.join(output_dir, "validation_samples.json"),
+        result["discovery_cases"],
+    )
+    _write_json(
+        os.path.join(output_dir, "operator_pool.json"),
+        result["raw_operators"],
+    )
     generated_code_count = sum(
         isinstance(operator.get("generated_code"), str)
         and bool(operator["generated_code"].strip())
         for operator in result["raw_operators"]
     )
-    operators_by_case = {}
-    for operator in result["raw_operators"]:
-        operators_by_case.setdefault(operator["origin_case_id"], []).append(operator)
-    sample_views = []
-    for case in result["discovery_cases"]:
-        case_id = case["case_id"]
-        sample_view = {
-            "sample_id": case_id,
-            "bundle_id": case["bundle_id"],
-            "input_items": case["partial_items"],
-            "evaluation": case["evaluation"],
-            "operators": operators_by_case.get(case_id, []),
-        }
-        sample_views.append(sample_view)
-        _write_json(os.path.join(output_dir, "samples", f"{case_id}.json"), sample_view)
-    _write_json(os.path.join(output_dir, "operators_by_sample.json"), sample_views)
     _write_json(
         os.path.join(output_dir, "summary.json"),
         {
             "validation_sample_count": len(result["discovery_cases"]),
-            "max_operators_per_sample": result["max_operators_per_case"],
+            "strategies_per_sample": 3,
             "llm_calls_per_sample": 1,
             "raw_operator_count": len(result["raw_operators"]),
             "generated_code_count": generated_code_count,
@@ -224,7 +231,7 @@ async def _run(args):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Induce compact source-aware operators from validation samples"
+        description="Generate three hyperedge-only spec-first strategies"
     )
     parser.add_argument("--config", default="config_operator.yaml")
     parser.add_argument("--sample_count", type=int, default=None)

@@ -17,6 +17,7 @@ from operator_learning.pipeline import (
     admit_verified_programs,
     compile_operator_programs,
     deduplicate_raw_operators,
+    enrich_case_source_diagnostics,
     induce_raw_operators,
     verify_compiled_programs,
 )
@@ -71,6 +72,69 @@ def program_spec(
     }
 
 
+def strategy_spec(
+    *,
+    strategy_id="S1",
+    intent="The completed set forms a coherent historical composition.",
+    name="HistoricalBundleOverlap",
+    description=(
+        "Compare each candidate through historical bundles shared with the partial items."
+    ),
+    source="bundle_item_history",
+):
+    return {
+        "strategy_id": strategy_id,
+        "intent": intent,
+        "name": name,
+        "description": description,
+        "reference_construction": (
+            "Collect historical bundles connected to the partial items."
+        ),
+        "candidate_relation": (
+            "Check how each candidate connects to the partial-conditioned bundles."
+        ),
+        "evidence_route": [
+            "partial items",
+            "historical bundles",
+            "candidate-conditioned bundle contexts",
+        ],
+        "required_sources": [source],
+        "pseudocode": [
+            "build a partial-conditioned historical bundle reference",
+            "apply the same candidate relation to every candidate",
+            "return bounded textual bundle contexts",
+        ],
+    }
+
+
+def induction_program(strategy_id="S1"):
+    return {
+        "strategy_id": strategy_id,
+        "code": (
+            "def run(partial_items, candidate_items, source_paths, "
+            "max_contexts_per_candidate=5):\n"
+            "    return [\n"
+            "        {\n"
+            "            'label': candidate['label'],\n"
+            "            'item_id': candidate['item_id'],\n"
+            "            'contexts': [],\n"
+            "        }\n"
+            "        for candidate in candidate_items\n"
+            "    ]\n"
+        ),
+    }
+
+
+def induction_response(*strategies):
+    return {
+        "strategy_specs": list(strategies),
+        "programs": [
+            induction_program(strategy["strategy_id"])
+            for strategy in strategies
+        ],
+    }
+
+
 def valid_program_code():
     return '''
 def execute(partial_item_ids, source_api, candidate_budget, evidence_budget):
@@ -121,7 +185,7 @@ def execute(partial_item_ids, source_api, candidate_budget, evidence_budget):
 
 
 class CandidateProgramInductionTest(unittest.IsolatedAsyncioTestCase):
-    async def test_induction_prompt_is_structurally_candidate_blind(self):
+    async def test_induction_prompt_exposes_candidates_but_hides_the_gt_identity(self):
         case = {
             "case_id": "bundle_1",
             "dataset": "pog_dense",
@@ -133,6 +197,10 @@ class CandidateProgramInductionTest(unittest.IsolatedAsyncioTestCase):
                     "metadata": {"cate_id": "outerwear"},
                 }
             ],
+            "candidate_items": [
+                {"label": "A", "item_id": 20, "text": "black trousers"},
+                {"label": "B", "item_id": 21, "text": "white sneakers"},
+            ],
             "source_diagnostics": {
                 "partial_item_count": 1,
                 "partial_metadata_coverage": {"covered": 1, "total": 1},
@@ -143,27 +211,33 @@ class CandidateProgramInductionTest(unittest.IsolatedAsyncioTestCase):
                 "benchmark_candidate_item_ids": [999999, 888888],
             },
         }
-        response = {
-            "hypotheses": [
-                {
-                    "id": "H1",
-                    "observed_cues": [
-                        "black color",
-                        "tailored outerwear silhouette",
-                    ],
-                    "statement": (
-                        "The bundle may be assembling a polished coordinated outfit "
-                        "that needs a complementary item role."
-                    ),
-                }
-            ],
-            "operators": [
-                {
-                    "hypothesis_id": "H1",
-                    **program_spec(),
-                }
-            ],
-        }
+        response = induction_response(
+            strategy_spec(),
+            strategy_spec(
+                strategy_id="S2",
+                name="CategoryCompositionGap",
+                description=(
+                    "Compare candidate categories with the category composition "
+                    "of historical bundles related to the partial set."
+                ),
+                source="item_metadata",
+            ),
+            strategy_spec(
+                strategy_id="S3",
+                name="ConditionalCompanionConsistency",
+                description=(
+                    "Measure whether a candidate repeatedly completes historical "
+                    "contexts containing multiple partial anchors."
+                ),
+            ),
+        )
+        response["programs"][0]["code"] = (
+            "import json\n\n"
+            "def run(partial_items, candidate_items, source_paths, "
+            "max_contexts_per_candidate=5):\n"
+            "    return []\n"
+        )
+        response["programs"].reverse()
         calls = []
 
         async def call_text(prompt, step_name):
@@ -172,8 +246,7 @@ class CandidateProgramInductionTest(unittest.IsolatedAsyncioTestCase):
 
         conf = {
             "dataset": "pog_dense",
-            "operator_induction_count": 4,
-            "operator_memory_max_size": 24,
+            "operator_induction_count": 3,
             "operator_prompt_text_only": True,
         }
         with patch(
@@ -189,30 +262,197 @@ class CandidateProgramInductionTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(calls), 1)
         prompt, step_name = calls[0]
-        self.assertIn("CANDIDATE-BLIND DISCOVERY CASE", prompt)
-        self.assertIn("semantic completion hypothesis", prompt)
-        self.assertIn("FORBIDDEN PREVIOUS PROGRAM SIGNATURES", prompt)
-        self.assertIn('"observed_cues"', prompt)
-        self.assertIn(CANDIDATE_PROPOSAL_OUTPUT_CONTRACT, prompt)
+        self.assertIn("Strategy Designer", prompt)
+        self.assertIn("INPUT CASE", prompt)
+        self.assertIn("SOURCE DIAGNOSTICS", prompt)
+        self.assertIn(
+            '"availability": "available" means that the source exists',
+            prompt,
+        )
+        self.assertIn(
+            '"none": no partial item has a direct source record or relation',
+            prompt,
+        )
+        self.assertIn("SOURCE MANIFEST", prompt)
+        self.assertIn("PROGRAM CONTRACT", prompt)
+        self.assertIn("construct Bi = P union {ci}", prompt)
+        self.assertIn("difficult to distinguish", prompt)
+        self.assertEqual(prompt.count("Bi = P union {ci}"), 1)
+        self.assertIn("from a bundle-completion perspective", prompt)
+        self.assertIn(
+            "Exactly one candidate item is the actual missing item to add to "
+            "the given partial bundle",
+            prompt,
+        )
+        self.assertIn("competing completion hypotheses", prompt)
+        self.assertIn(
+            "Infer exactly three distinct and plausible completion intents",
+            prompt,
+        )
+        self.assertIn("fits every hypothetical bundle equally", prompt)
+        self.assertIn("STRATEGY DEFINITION", prompt)
+        self.assertIn(
+            "This shared evaluation basis is called the reference",
+            prompt,
+        )
+        self.assertIn(
+            "A reference is not the correct candidate or any particular candidate",
+            prompt,
+        )
+        self.assertIn(
+            "use the same reference to evaluate every candidate",
+            prompt,
+        )
+        self.assertIn(
+            "return an empty contexts list for that candidate",
+            prompt,
+        )
+        self.assertIn(
+            "must show a concrete connection between that candidate "
+            "and the shared reference",
+            prompt,
+        )
+        self.assertIn(
+            "Do not return shared reference contexts selected "
+            "independently of the candidate",
+            prompt,
+        )
+        self.assertNotIn('"sparse_fallback"', prompt)
+        self.assertIn('"intent": "one plausible interpretation', prompt)
+        self.assertNotIn("retrieve_intent_conditioned_context", prompt)
+        self.assertIn(
+            '"code": "complete Python source implementing the exact S1 specification"',
+            prompt,
+        )
+        self.assertIn("provide all imports and helper", prompt)
+        self.assertIn('"pseudocode"', prompt)
+        self.assertIn("source-grounded textual contexts", prompt)
+        self.assertIn("Numerical computations may be used internally", prompt)
+        self.assertIn(
+            "do not output numerical scores, similarities, distances, counts, "
+            "or diagnostic messages as contexts",
+            prompt,
+        )
+        self.assertIn(
+            "related item text or historical bundle item-text composition",
+            prompt,
+        )
+        self.assertIn('"contexts": [', prompt)
+        self.assertIn(
+            "def run(partial_items, candidate_items, source_paths,",
+            prompt,
+        )
+        self.assertIn(
+            '"sources": ["one or more exact declared source IDs"]',
+            prompt,
+        )
+        self.assertIn("source_paths maps each exact", prompt)
+        self.assertIn("historical bundle item-text composition", prompt)
+        self.assertNotIn('"signals": signals', prompt)
+        self.assertIn('"strategy_specs"', prompt)
+        self.assertIn('"programs"', prompt)
+        self.assertLess(prompt.index('"strategy_specs"'), prompt.index('"programs"'))
         self.assertIn("black tailored jacket", prompt)
+        self.assertIn("black trousers", prompt)
+        self.assertIn('"item_id": 20', prompt)
         self.assertNotIn("SECRET_GT_ITEM", prompt)
         self.assertNotIn("999999", prompt)
         self.assertNotIn("888888", prompt)
         self.assertNotIn("ground_truth", prompt)
-        self.assertNotIn('"candidates"', prompt)
-        self.assertIn("candidate-blind program induction", step_name)
-        self.assertEqual(
+        self.assertNotIn("SOURCE GROUNDING", prompt)
+        self.assertNotIn("FORBIDDEN PREVIOUS PROGRAM SIGNATURES", prompt)
+        self.assertNotIn("semantic completion hypothesis", prompt)
+        self.assertIn("candidate-relation strategy induction", step_name)
+        self.assertIn(
+            "Intent: " + response["strategy_specs"][0]["intent"],
             result["raw_operators"][0]["hypothesis"],
-            response["operators"][0]["hypothesis"],
         )
+        self.assertIn(
+            "Candidate relation: "
+            + response["strategy_specs"][0]["candidate_relation"],
+            result["raw_operators"][0]["hypothesis"],
+        )
+        self.assertEqual(
+            result["raw_operators"][0]["generated_code"],
+            next(
+                program["code"]
+                for program in response["programs"]
+                if program["strategy_id"] == "S1"
+            ),
+        )
+        self.assertEqual(result["induction_traces"][0]["validation_issues"], [])
         self.assertNotIn("inputs", result["raw_operators"][0])
         self.assertNotIn("output", result["raw_operators"][0])
 
-    async def test_induction_memory_is_a_compact_forbidden_signature_list(self):
+    def test_source_diagnostics_are_categorical_without_density_or_counts(self):
+        case = {
+            "partial_items": [
+                {"item_id": 10, "text": "black jacket", "metadata": {}},
+                {"item_id": 11, "text": "white shirt", "metadata": {}},
+            ],
+            "source_diagnostics": {
+                "partial_item_count": 2,
+                "partial_metadata_coverage": {"covered": 2, "total": 2},
+            },
+        }
+        source_capabilities = {
+            "components": [
+                {"id": "item_metadata"},
+                {"id": "bundle_item_history"},
+                {"id": "user_item_history"},
+                {"id": "item_content_embedding"},
+            ]
+        }
+        diagnostic_indices = {
+            "bundle_item_history": {
+                "item_to_anchors": {"10": ["100"], "11": []},
+                "anchor_to_items": {"100": ["10", "20"]},
+            },
+            "user_item_history": {
+                "item_to_anchors": {},
+                "anchor_to_items": {},
+            },
+        }
+
+        enrich_case_source_diagnostics(
+            case,
+            source_capabilities,
+            diagnostic_indices,
+        )
+
+        self.assertEqual(
+            case["source_diagnostics"],
+            {
+                "bundle_item_history": {
+                    "availability": "available",
+                    "partial_coverage": "partial",
+                },
+                "item_content_embedding": {
+                    "availability": "available",
+                },
+                "item_metadata": {
+                    "availability": "available",
+                    "partial_coverage": "full",
+                },
+                "user_item_history": {
+                    "availability": "available",
+                    "partial_coverage": "none",
+                },
+            },
+        )
+        serialized = json.dumps(case["source_diagnostics"])
+        self.assertNotIn("density", serialized)
+        self.assertNotIn("count", serialized)
+
+    async def test_induction_memory_is_not_included_in_the_prompt(self):
         case = {
             "case_id": "bundle_2",
             "dataset": "pog_dense",
             "partial_items": [{"item_id": 11, "text": "cream knit top"}],
+            "candidate_items": [
+                {"label": "A", "item_id": 30, "text": "cream skirt"},
+                {"label": "B", "item_id": 31, "text": "blue jeans"},
+            ],
             "source_diagnostics": {},
             "evaluation": {
                 "ground_truth_item_id": 12,
@@ -220,29 +460,18 @@ class CandidateProgramInductionTest(unittest.IsolatedAsyncioTestCase):
                 "benchmark_candidate_item_ids": [],
             },
         }
-        response = {
-            "hypotheses": [
-                {
-                    "id": "H1",
-                    "observed_cues": ["soft knit texture", "neutral cream color"],
-                    "statement": (
-                        "The bundle may be forming a soft neutral layered outfit."
-                    ),
-                }
-            ],
-            "operators": [
-                {
-                    "hypothesis_id": "H1",
-                    **program_spec(
-                        name="RetrieveLayeringCompanions",
-                        hypothesis=(
-                            "Items supported by neutral layering contexts are "
-                            "plausible complementary candidates."
-                        ),
-                    ),
-                }
-            ],
-        }
+        response = induction_response(
+            strategy_spec(name="RetrieveLayeringCompanions"),
+            strategy_spec(
+                strategy_id="S2",
+                name="CategoryCompositionGap",
+                source="item_metadata",
+            ),
+            strategy_spec(
+                strategy_id="S3",
+                name="ConditionalCompanionConsistency",
+            ),
+        )
         prompts = []
 
         async def call_text(prompt, step_name):
@@ -257,8 +486,7 @@ class CandidateProgramInductionTest(unittest.IsolatedAsyncioTestCase):
                 [{}],
                 {
                     "dataset": "pog_dense",
-                    "operator_induction_count": 4,
-                    "operator_memory_max_size": 24,
+                    "operator_induction_count": 3,
                     "operator_prompt_text_only": True,
                 },
                 call_text,
@@ -267,16 +495,9 @@ class CandidateProgramInductionTest(unittest.IsolatedAsyncioTestCase):
             )
 
         prompt = prompts[0]
-        memory_section = prompt.split(
-            "FORBIDDEN PREVIOUS PROGRAM SIGNATURES", 1
-        )[1].split("SOURCE MANIFEST", 1)[0]
-        self.assertIn('"name": "RetrieveRecurringBundleCompanions"', memory_section)
-        self.assertIn('"hypothesis"', memory_section)
-        self.assertIn('"required_sources"', memory_section)
-        self.assertIn('"evidence_types"', memory_section)
-        self.assertNotIn('"pseudocode"', memory_section)
-        self.assertNotIn('"applicability"', memory_section)
-        self.assertNotIn('"output_contract"', memory_section)
+        self.assertNotIn("FORBIDDEN PREVIOUS PROGRAM SIGNATURES", prompt)
+        self.assertNotIn("RetrieveRecurringBundleCompanions", prompt)
+        self.assertNotIn("candidate_proposals_with_source_provenance", prompt)
 
     async def test_compilation_is_one_call_per_unique_program(self):
         operator = {

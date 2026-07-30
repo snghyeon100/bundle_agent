@@ -1,4 +1,4 @@
-"""Prompts for the two-call online hypothesis-program pipeline."""
+"""Prompts for completion-exemplar retrieval and final prediction."""
 
 from code.common import pretty_json, task_semantics
 
@@ -7,8 +7,7 @@ from .schemas import DISCOVERY_SCHEMA_VERSION
 
 def _fashion_semantics(dataset):
     return (
-        "A fashion outfit is a complementary composition of item roles rather than "
-        "a set of merely similar or interchangeable products.\n\n"
+        "A fashion outfit is a composition of complementary item roles.\n\n"
         if str(dataset or "").lower() in {"pog", "pog_dense"}
         else ""
     )
@@ -18,155 +17,174 @@ def program_generation_prompt(
     *,
     dataset,
     partial_items,
-    source_diagnostics,
-    source_capabilities,
+    workspace_manifest,
+    min_hypotheses,
     max_hypotheses,
+    retrieved_item_budget,
+    supporting_context_budget,
 ):
-    """Build candidate-blind LLM1 input."""
-    case = {
-        "dataset": dataset,
-        "partial_items": [
-            {
-                key: item[key]
-                for key in ("text", "metadata")
-                if key in item
+    """Build the LLM1 hypothesis-conditioned retrieval prompt."""
+    partial_item_view = [
+        {
+            "item_id": int(item["item_id"]),
+            "text": str(item.get("text") or ""),
+        }
+        for item in partial_items
+        if isinstance(item, dict) and "item_id" in item
+    ]
+    workspace_view = {
+        "item_ids": workspace_manifest.get("always_available", {}).get(
+            "item_ids",
+            "tuple of every canonical integer corpus item_id",
+        ),
+        **{
+            str(component.get("id")): {
+                key: component[key]
+                for key in (
+                    "meaning",
+                    "source_record_format",
+                    "runtime_format",
+                    "observed_field_schema",
+                )
+                if key in component
             }
-            for item in partial_items
-            if isinstance(item, dict)
-        ],
-        "source_diagnostics": source_diagnostics,
+            for component in workspace_manifest.get("components", [])
+            if isinstance(component, dict) and component.get("id")
+        },
     }
+    budget = {
+        "max_retrieved_items": int(retrieved_item_budget),
+        "max_supporting_contexts_per_item": int(supporting_context_budget),
+    }
+    interpretation_count_instruction = (
+        f"Interpret the partial bundle in exactly {int(min_hypotheses)} "
+        "genuinely different ways."
+        if int(min_hypotheses) == int(max_hypotheses)
+        else (
+            f"Interpret the partial bundle in {int(min_hypotheses)} to "
+            f"{int(max_hypotheses)} genuinely different ways."
+        )
+    )
     return (
-        "You are the online Hypothesis-Conditioned Search Program Agent for bundle "
-        "completion.\n\n"
-        f"{task_semantics(dataset)}\n\n"
+        "You are the Completion Retrieval Program Synthesis Agent.\n\n"
+        f"{task_semantics(dataset)}\n"
         f"{_fashion_semantics(dataset)}"
-        "GOAL\n"
-        "From the observed partial bundle, infer several plausible semantic intents and "
-        "missing-item roles. For each hypothesis, synthesize one case-conditioned Python "
-        "search program that retrieves a small set of plausible missing-item candidates "
-        "from the corpus. This is an online program for the current case; it does not need "
-        "to be a reusable library operator.\n\n"
-        "A semantic hypothesis is a plausible account of the bundle being assembled: the "
-        "coherent style, occasion, function, theme, or composition that could connect the "
-        "observed items, plus the complementary contribution a missing item could make. "
-        "Ground it in concrete cues visible in the partial-item descriptions. Produce "
-        "meaningfully different interpretations, not different search procedures for the "
-        "same interpretation.\n\n"
-        "CANDIDATE BLINDNESS\n"
-        "No benchmark answer options or ground truth are available in this call. Never "
-        "assume, reconstruct, or refer to them. The generated code must retrieve canonical "
-        "corpus item IDs through SourceAPI and must exclude the partial item IDs.\n\n"
-        "PROGRAM EXECUTION BOUNDARY\n"
-        "Each code string must define exactly one public function:\n\n"
-        "def execute(partial_item_ids, source_api, candidate_budget, evidence_budget):\n"
-        "    ...\n\n"
-        "The code may use only the supplied arguments, safe Python builtins, and permitted "
-        "standard-library imports. It must not read files, access paths, use the network, "
-        "spawn processes, inspect the runtime, or import third-party libraries. It must "
-        "access data only through the documented SourceAPI methods. Use candidate_budget "
-        "and evidence_budget directly; do not hard-code alternative K, M, or top-N output "
-        "budgets.\n\n"
-        "Every program must return exactly this internal object:\n"
+        "PARTIAL BUNDLE\n"
+        f"{pretty_json({'partial_items': partial_item_view})}\n\n"
+        "The item IDs above are the same entity IDs received through "
+        "partial_item_ids at runtime. Use the function argument to bind the case "
+        "instead of writing those literal IDs into code.\n\n"
+        f"{interpretation_count_instruction} For each interpretation, "
+        "state the latent principle connecting the observed items and the relation "
+        "that a plausible additional item should have with the bundle.\n\n"
+        "Design each program as a creative, high-level retrieval strategy that goes "
+        "beyond an obvious one-hop co-occurrence or nearest-neighbor heuristic by "
+        "purposefully connecting non-trivial intermediate references and source "
+        "relations; every added step must materially implement the hypothesis rather "
+        "than add complexity for its own sake.\n\n"
+        "For every interpretation, write one Python program that searches the corpus "
+        "for a small set of plausible completion items. The program must first build "
+        "a hypothesis-specific reference from the runtime partial_item_ids, then "
+        "retrieve items according to their relation to that reference. Different "
+        "programs must create materially different references or test materially "
+        "different item relations; paraphrasing the same search is not a distinct "
+        "strategy.\n\n"
+        "The visible partial text guides the interpretation and program design. The "
+        "program remains reusable because the actual case is bound at runtime through "
+        "partial_item_ids. Semantic role conditions may refine items reached from the "
+        "partial-conditioned reference.\n\n"
+        "FUNCTION CONTRACT\n\n"
+        "def retrieve(partial_item_ids, dataset_workspace, parameters, budget):\n"
+        "    partial_set = set(partial_item_ids)\n"
+        "    retrieved_items = []\n"
+        "    # construct a reference from partial_item_ids and required sources\n"
+        "    # retrieve and rank non-partial items against that reference\n"
+        "    # attach source records that justify each retrieved item\n"
+        "    return retrieved_items[:budget['max_retrieved_items']]\n\n"
+        "dataset_workspace has exactly the top-level shape shown below. Access a "
+        "source directly, for example dataset_workspace['bundle_item_history']. "
+        "item_ids is always available and is not a required_sources source ID. "
+        "budget contains max_retrieved_items and "
+        "max_supporting_contexts_per_item. Use safe Python builtins and the "
+        "standard-library "
+        "modules collections, functools, heapq, itertools, math, and statistics as "
+        "needed.\n\n"
+        "retrieve returns a list of at most budget['max_retrieved_items'] objects. "
+        "Each object has this exact shape:\n"
         "{\n"
-        '  "candidate_proposals": [\n'
-        '    {"item_id": "<integer item ID returned by SourceAPI>", '
-        '"evidence_refs": ["E1"]}\n'
-        "  ],\n"
-        '  "evidence_records": [\n'
+        '  "item_id": 0,\n'
+        '  "provenance": [\n'
         "    {\n"
-        '      "evidence_id": "E1",\n'
-        '      "type": "one declared evidence type",\n'
         '      "source": "one required source ID",\n'
-        '      "anchor_item_ids": ["<integer partial item ID>"],\n'
-        '      "related_item_ids": ["<integer proposed item ID>"],\n'
-        '      "related_bundle_ids": [],\n'
-        '      "attributes": {}\n'
-        "    }\n"
-        "  ],\n"
-        '  "used_sources": ["one required source ID"]\n'
-        "}\n\n"
-        "Every proposed item must reference at least one evidence record whose "
-        "related_item_ids contains that item. Empty candidate and evidence arrays are valid "
-        "when the program finds nothing. Evidence records are raw audit provenance; a "
-        "deterministic renderer will later resolve useful item/bundle context and remove "
-        "raw IDs and numeric scores before prediction.\n\n"
-        "SOURCE SEMANTICS\n"
-        "Source diagnostics indicate feasibility, not bundle intent. Category IDs are "
-        "opaque identifiers: equality, frequency, novelty, and co-occurrence are valid, "
-        "but a category ID has no named semantic role unless explicit item text supports "
-        "that interpretation. Embeddings are opaque vectors and may be used through the "
-        "neighbor API, but they must not be decoded into named attributes. Explicit lexical "
-        "information in item text may be used. Choose only sources actually needed by each "
-        "program, and keep evidence representative and bounded.\n\n"
-        "AVAILABLE SOURCEAPI\n"
-        f"{pretty_json(source_capabilities)}\n\n"
-        "CANDIDATE-BLIND ONLINE CASE\n"
-        f"{pretty_json(case)}\n\n"
-        f"Return JSON only with between 1 and {int(max_hypotheses)} hypotheses and "
-        "one Python program per hypothesis. Code must be encoded as a JSON string:\n"
-        "{\n"
-        f'  "schema_version": "{DISCOVERY_SCHEMA_VERSION}",\n'
-        '  "hypotheses": [\n'
-        "    {\n"
-        '      "id": "H1",\n'
-        '      "observed_cues": ["concrete cue from a partial-item description"],\n'
-        '      "intent": "one-sentence interpretation of the bundle composition",\n'
-        '      "missing_role": "the complementary contribution a missing item could make"\n'
-        "    }\n"
-        "  ],\n"
-        '  "programs": [\n'
-        "    {\n"
-        '      "hypothesis_id": "H1",\n'
-        '      "program_id": "P1",\n'
-        '      "name": "ConcisePascalCaseName",\n'
-        '      "required_sources": ["exact source component ID"],\n'
-        '      "evidence_types": ["short structural evidence label"],\n'
-        '      "code": "def execute(partial_item_ids, source_api, candidate_budget, evidence_budget):\\n    ..."\n'
+        '      "relation": "why this item was retrieved under the hypothesis",\n'
+        '      "supporting_context": {\n'
+        '        "item_ids": [],\n'
+        '        "bundle_ids": [],\n'
+        '        "user_ids": []\n'
+        "      }\n"
         "    }\n"
         "  ]\n"
         "}\n\n"
-        "Return no markdown and no explanation outside the JSON object."
+        "Each retrieved item has at least one provenance record and at most "
+        "budget['max_supporting_contexts_per_item']. Each provenance record is one "
+        "representative supporting context. The returned item IDs and context IDs are "
+        "internal references; the runtime resolves them into readable item, bundle, "
+        "and user contexts for the prediction agent. Return an empty list when no "
+        "grounded completion exemplar is found.\n\n"
+        "DATASET_WORKSPACE RUNTIME SHAPE\n"
+        f"{pretty_json(workspace_view)}\n\n"
+        "FIXED RUNTIME BUDGET\n"
+        f"{pretty_json(budget)}\n\n"
+        "Return JSON only in this exact structure. Encode Python code as a JSON "
+        "string:\n"
+        "{\n"
+        f'  "schema_version": "{DISCOVERY_SCHEMA_VERSION}",\n'
+        '  "programs": [\n'
+        "    {\n"
+        '      "id": "P1",\n'
+        '      "hypothesis": "latent bundle principle and the relation an additional item should have with it",\n'
+        '      "strategy": {\n'
+        '        "reference": "how the partial-conditioned reference is constructed",\n'
+        '        "retrieval": "how plausible completion items are retrieved from that reference"\n'
+        "      },\n"
+        '      "required_sources": ["exact source component ID"],\n'
+        '      "parameters": {},\n'
+        '      "code": "def retrieve(partial_item_ids, dataset_workspace, parameters, budget):\\n    ..."\n'
+        "    }\n"
+        "  ]\n"
+        "}\n"
     )
 
 
-def prediction_prompt(*, dataset, partial_items, answer_options, search_evidence):
-    """Build LLM2 input without raw source IDs or numeric retrieval scores."""
+def prediction_prompt(*, dataset, partial_items, answer_options, retrieval_evidence):
+    """Build the LLM2 exemplar-aware ranking prompt."""
     payload = {
         "dataset": dataset,
-        "partial_items": [
-            {
-                key: item[key]
-                for key in ("text", "metadata")
-                if key in item
-            }
+        "partial_item_texts": [
+            str(item.get("text") or "")
             for item in partial_items
             if isinstance(item, dict)
         ],
-        "hypothesis_search_results": search_evidence,
+        "hypotheses_and_retrieved_exemplars": retrieval_evidence,
         "answer_options": answer_options,
     }
     return (
-        "You are the final Prediction Agent for bundle completion.\n\n"
-        f"{task_semantics(dataset)}\n\n"
+        "You are the Retrieval-Grounded Prediction Agent for bundle completion.\n\n"
+        f"{task_semantics(dataset)}\n"
         f"{_fashion_semantics(dataset)}"
-        "Select exactly one answer-option label. The semantic hypotheses were inferred "
-        "without seeing the answer options. Retrieved examples came from the corpus under "
-        "hypothesis-conditioned programs; they may or may not be identical to an answer "
-        "option. Use them as source-grounded completion exemplars and compare their semantic "
-        "and compositional patterns with every answer option. An exact option match is "
-        "direct support, but absence of an exact match does not by itself reject an option. "
-        "Failed or empty searches provide no evidence and must not be treated as negative "
-        "evidence.\n\n"
-        "The search evidence intentionally excludes raw item, bundle, and user IDs as well "
-        "as opaque numeric scores. Base the decision on the readable item text, relation "
-        "summaries, representative contexts, and the partial bundle. Do not output a "
-        "retrieved exemplar unless it is one of the labeled answer options.\n\n"
-        "ONLINE DECISION CASE\n"
+        "Each completion hypothesis is accompanied by corpus items retrieved from "
+        "source data and readable provenance explaining their inclusion. Treat the "
+        "retrieved items as hypothesis-specific completion exemplars. An exemplar can "
+        "inform the expected relation or item type even when it is not itself an "
+        "answer option. Compare the partial bundle, retrieved exemplars, provenance, "
+        "and answer-option text, then rank every option from most to least plausible.\n\n"
+        "DECISION CASE\n"
         f"{pretty_json(payload)}\n\n"
-        "Return JSON only:\n"
+        "Return JSON only. Include every supplied label exactly once, and make "
+        "prediction equal ranking[0]. Keep rationale to at most two sentences:\n"
         "{\n"
-        '  "prediction": "one supplied answer-option label",\n'
-        '  "rationale": "brief comparison grounded in the hypotheses and readable evidence"\n'
+        '  "prediction": "top-ranked label",\n'
+        '  "ranking": ["all labels exactly once"],\n'
+        '  "rationale": "brief retrieval-grounded comparison"\n'
         "}\n"
     )
