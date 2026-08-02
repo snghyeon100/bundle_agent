@@ -383,9 +383,9 @@ def enrich_case_source_diagnostics(case, source_capabilities, diagnostic_indices
 
 
 def _max_operators_per_case(conf, operators_per_case=None):
-    maximum = int(operators_per_case or conf.get("operator_induction_count", 4))
-    if maximum != 3:
-        raise ValueError("operator_induction_count must be exactly 3")
+    maximum = int(operators_per_case or conf.get("operator_induction_count", 5))
+    if maximum <= 0:
+        raise ValueError("operator_induction_count must be positive")
     return maximum
 
 
@@ -400,7 +400,7 @@ async def induce_raw_operators(
     trace_callback=None,
     prompt_builder=None,
 ):
-    """Induce three reusable candidate-relation strategies per case."""
+    """Induce the configured number of candidate-relation strategies per case."""
     del initial_operator_memory
     prompt_builder = prompt_builder or induction_prompt
     maximum = _max_operators_per_case(conf, operators_per_case)

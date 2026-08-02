@@ -54,6 +54,15 @@ def _string_list(value, *, allow_empty=False):
     )
 
 
+def _pseudocode_list(value):
+    """Accept blank strings used only as visual separators between code blocks."""
+    return (
+        isinstance(value, list)
+        and any(_non_empty_string(item) for item in value)
+        and all(isinstance(item, str) for item in value)
+    )
+
+
 def _normalized_text(value):
     return "".join(
         character
@@ -245,9 +254,15 @@ def validate_induction_result(
         ):
             if not _non_empty_string(strategy.get(field)):
                 issues.append(f"{prefix}.{field} must be a non-empty string")
-        for field in ("evidence_route", "pseudocode"):
-            if not _string_list(strategy.get(field)):
-                issues.append(f"{prefix}.{field} must be a non-empty string list")
+        if not _string_list(strategy.get("evidence_route")):
+            issues.append(
+                f"{prefix}.evidence_route must be a non-empty string list"
+            )
+        if not _pseudocode_list(strategy.get("pseudocode")):
+            issues.append(
+                f"{prefix}.pseudocode must be a string list with at least "
+                "one non-empty step"
+            )
         sources = strategy.get("required_sources")
         if not _string_list(sources):
             issues.append(f"{prefix}.required_sources must be a non-empty string list")

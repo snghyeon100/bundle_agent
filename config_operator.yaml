@@ -18,13 +18,13 @@ openai_send_temperature: false
 openai_reasoning_effort: "low"
 code_generation_provider: openai #gemini
 code_generation_model: gpt-5-mini #gemini-3-flash-preview
-code_generation_api_key_env: "OPENAI_KEY"
-operator_max_output_tokens: 15000
+code_generation_api_key_env: "DMLAB_KEY"
+operator_max_output_tokens: 25000
 
 # Hypothesis-conditioned candidate-program MVP
 operator_discovery_count: 12
 operator_discovery_seed: 42
-operator_induction_count: 3       # exactly three strategies per discovery sample
+operator_induction_count: 5       # over-generate five strategies per sample
 operator_prompt_text_only: true   # prompt omits IDs as well as all candidate/GT fields
 operator_dedup_similarity_threshold: 0.90
 operator_library_min_size: 1
@@ -33,6 +33,11 @@ operator_candidate_budget: 10
 operator_evidence_budget: 8
 operator_prediction_max_contexts_per_candidate: 0  # 0 keeps every generated context
 operator_prediction_max_context_chars: 0            # 0 keeps context text unchanged
+operator_curator_provider: openai
+operator_curator_model: gpt-5-mini
+operator_curator_api_key_env: "DMLAB_KEY"
+operator_curator_max_output_tokens: 4000
+operator_curator_max_selected_strategies: 3
 operator_prediction_max_output_tokens: 2000
 operator_prediction_sample_count: 250
 operator_prediction_max_concurrent: 1

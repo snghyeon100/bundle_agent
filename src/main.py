@@ -89,6 +89,18 @@ STAGE_CONFIG = {
             "sem_prediction_model",
         ],
     },
+    "curator": {
+        "provider_keys": [
+            "operator_curator_provider",
+            "code_curator_provider",
+            "code_prediction_provider",
+        ],
+        "model_keys": [
+            "operator_curator_model",
+            "code_curator_model",
+            "code_prediction_model",
+        ],
+    },
 }
 
 

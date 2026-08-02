@@ -131,13 +131,40 @@ def induction_prompt(
     *,
     text_only=True,
 ):
-    del operator_memory, max_operator_count, text_only
+    del operator_memory, text_only
+    strategy_count = int(max_operator_count)
+    if strategy_count <= 0:
+        raise ValueError("max_operator_count must be positive")
+    count_words = {
+        1: "one",
+        2: "two",
+        3: "three",
+        4: "four",
+        5: "five",
+        6: "six",
+        7: "seven",
+        8: "eight",
+        9: "nine",
+        10: "ten",
+    }
+    strategy_count_text = count_words.get(
+        strategy_count,
+        str(strategy_count),
+    )
+    strategy_ids = [f"S{index}" for index in range(1, strategy_count + 1)]
+    if len(strategy_ids) == 1:
+        strategy_ids_text = strategy_ids[0]
+    else:
+        strategy_ids_text = (
+            ", ".join(strategy_ids[:-1]) + f", and {strategy_ids[-1]}"
+        )
     prompt_case = strategy_case_view(case)
     return (
         "You are a Strategy Designer for bundle completion.\n\n"
         f"{task_semantics(case.get('dataset'))}\n\n"
         "GOAL\n"
-        "Do not choose the correct answer for the current case. Design exactly three "
+        f"Do not choose the correct answer for the current case. Design exactly "
+        f"{strategy_count_text} "
         "reusable computational strategies that distinguish candidates from a "
         "bundle-completion perspective.\n\n"
         "TASK\n"
@@ -156,7 +183,8 @@ def induction_prompt(
         "completed bundle. Do not compare ci with each partial item independently. "
         "Consider the purpose, theme, usage, composition, and item relationships that "
         "could make the whole Bi coherent.\n\n"
-        "Infer exactly three distinct and plausible completion intents for how the "
+        f"Infer exactly {strategy_count_text} distinct and plausible completion "
+        "intents for how the "
         "observed partial bundle P could be completed. A completion intent is a coherent "
         "explanation of the purpose, theme, usage, composition, or relation that could "
         "make items belong to one bundle. An intent must not be a broad explanation that "
@@ -179,20 +207,32 @@ def induction_prompt(
         "the reference once from the partial bundle and sources, then use the same "
         "reference to evaluate every candidate. Pair each completion intent one-to-one "
         "with exactly one strategy.\n\n"
+        "Keep each strategy narrow enough to be implemented as one coherent mechanism. "
+        "Treat reference_construction, candidate_relation, and evidence_route as "
+        "executable commitments, not broad conceptual summaries.\n\n"
+        "The pseudocode must be an exact operational expansion of these commitments. "
+        "It must explicitly show: (1) how the shared reference is constructed once, "
+        "(2) where each candidate is bound to that reference, and (3) how "
+        "candidate-specific contexts are selected and returned. If every declared "
+        "mechanism cannot be implemented in the pseudocode, narrow the strategy before "
+        "writing the pseudocode.\n\n"
         "Each strategy returns a small, bounded set of contexts for every candidate. "
         "Every final context must be either a related "
         "item text or a historical bundle item-text composition retrieved from the "
         "available sources. Numerical computations may be used internally to retrieve, "
         "compare, and select representative contexts, but do not output numerical scores, "
         "similarities, distances, counts, or diagnostic messages as contexts.\n\n"
-        "The three strategies must use meaningfully different computations. Distinguish "
+        f"The {strategy_count_text} strategies must use meaningfully different "
+        "computations. Distinguish "
         "them through their reference construction, candidate relation, or evidence "
         "route. Each pair must differ in at least two of these aspects. "
         "Changing only wording, a metric, an embedding modality, a threshold, or a source "
         "file is not a different strategy.\n\n"
-        "First complete all three strategy specifications. Choose them according to the "
+        f"First complete all {strategy_count_text} strategy specifications. Choose "
+        "them according to the "
         "candidate ambiguities that need to be resolved, not according to implementation "
-        "convenience. Do not write any Python until all three specifications are complete. "
+        f"convenience. Do not write any Python until all {strategy_count_text} "
+        "specifications are complete. "
         "After emitting the specifications, treat them as immutable: the programs must "
         "implement them without replacing, simplifying, or omitting any declared "
         "reference, relation, or evidence-route step.\n\n"
@@ -250,7 +290,8 @@ def induction_prompt(
         "or ellipses.\n\n"
         "OUTPUT\n"
         "Return JSON only. The strategy_specs array must appear before programs, and must "
-        "contain all three complete specifications before any Python code appears:\n"
+        f"contain all {strategy_count_text} complete specifications before any "
+        "Python code appears:\n"
         "{\n"
         '  "strategy_specs": [\n'
         "    {\n"
@@ -262,7 +303,8 @@ def induction_prompt(
         '      "candidate_relation": "the same relation evaluated between each candidate and the shared reference",\n'
         '      "evidence_route": ["ordered source-grounded computation stages"],\n'
         '      "required_sources": ["exact source ID from the manifest"],\n'
-        '      "pseudocode": ["ordered reusable computation steps"]\n'
+        '      "pseudocode": ["ordered steps that exactly implement the declared '
+        'reference construction, candidate relation, and evidence route"]\n'
         "    }\n"
         "  ],\n"
         '  "programs": [\n'
@@ -272,8 +314,9 @@ def induction_prompt(
         "    }\n"
         "  ]\n"
         "}\n\n"
-        "Use strategy IDs S1, S2, and S3 exactly once in each array. Both arrays must "
-        "contain exactly three entries, and each program must implement the specification "
+        f"Use strategy IDs {strategy_ids_text} exactly once in each array. Both "
+        f"arrays must contain exactly {strategy_count_text} entries, and each program "
+        "must implement the specification "
         "with the same strategy_id. "
         "Return no explanation outside the JSON object."
     )

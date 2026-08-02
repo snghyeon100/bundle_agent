@@ -1,8 +1,9 @@
 """End-to-end batch evaluation for spec-first generated strategies.
 
-Each sample uses exactly two LLM calls:
-1. generate three immutable intent/strategy specs and their Python programs;
-2. rank every answer option from the executed candidate-specific contexts.
+Each sample uses exactly three LLM calls:
+1. generate the configured number of immutable intent/strategy specs and programs;
+2. select useful executed strategies and interpret their evidence per candidate;
+3. rank every option from candidate-local bundle-completion explanations.
 
 The default test[0:250] selection matches the direct plausible-set baseline.
 
@@ -42,6 +43,16 @@ from main import (
     stage_provider,
 )
 from online_hypothesis_program.schemas import validate_prediction_result
+from operator_learning.evidence_curator import (
+    candidate_completion_explanations,
+    evidence_curator_prompt,
+    normalize_evidence_curation,
+    select_curated_strategy_evidence,
+    validate_evidence_curation,
+)
+from operator_learning.evidence_summary import (
+    candidate_summary_prediction_prompt,
+)
 from operator_learning.pipeline import (
     _build_diagnostic_indices,
     _capability_names,
@@ -49,10 +60,7 @@ from operator_learning.pipeline import (
     build_operator_capability_manifest,
     enrich_case_source_diagnostics,
 )
-from operator_learning.prompts import (
-    induction_prompt,
-    strategy_evidence_prediction_prompt,
-)
+from operator_learning.prompts import induction_prompt
 from operator_learning.schemas import (
     resolve_induction_strategies,
     validate_induction_result,
@@ -74,6 +82,8 @@ RESULT_FIELDS = [
     "candidate_count",
     "strategy_count",
     "successful_program_count",
+    "selected_strategy_count",
+    "raw_evidence_context_count",
     "evidence_context_count",
     "prediction",
     "ranking",
@@ -136,7 +146,11 @@ def _build_client(conf, role):
             (
                 "operator_api_key_env"
                 if role == "code_generation"
-                else "operator_prediction_api_key_env"
+                else (
+                    "operator_curator_api_key_env"
+                    if role == "curator"
+                    else "operator_prediction_api_key_env"
+                )
             ),
             "online_prediction_api_key_env",
             "code_prediction_api_key_env",
@@ -229,6 +243,8 @@ def _error_row(sample_idx, sample, error, llm_calls=0):
         "candidate_count": len(sample.get("candidate_indices", [])),
         "strategy_count": 0,
         "successful_program_count": 0,
+        "selected_strategy_count": 0,
+        "raw_evidence_context_count": 0,
         "evidence_context_count": 0,
         "prediction": None,
         "ranking": [],
@@ -269,6 +285,9 @@ def _save_state(output_dir, rows, requested_count, partial):
 async def _run(args):
     with open(args.config, "r", encoding="utf-8") as handle:
         conf = yaml.safe_load(handle)
+    strategy_count = int(conf.get("operator_induction_count", 5))
+    if strategy_count <= 0:
+        raise ValueError("operator_induction_count must be positive")
     set_seed(int(conf.get("seed", 45)))
     split = str(args.split).strip().lower()
     if split not in {"valid", "test"}:
@@ -301,6 +320,7 @@ async def _run(args):
     diagnostic_indices = _build_diagnostic_indices(conf, allowed_sources)
     all_source_paths = source_paths_from_capabilities(workspace, capabilities)
     generation_client, generation_model = _build_client(conf, "code_generation")
+    curator_client, curator_model = _build_client(conf, "curator")
     prediction_client, prediction_model = _build_client(conf, "prediction")
 
     async def call_generation(prompt, step_name):
@@ -309,7 +329,7 @@ async def _run(args):
             generation_model["model"],
             prompt,
             conf,
-            int(conf.get("operator_max_output_tokens", 15000)),
+            int(conf.get("operator_max_output_tokens", 25000)),
             step_name,
         )
 
@@ -320,6 +340,16 @@ async def _run(args):
             prompt,
             conf,
             int(conf.get("operator_prediction_max_output_tokens", 2000)),
+            step_name,
+        )
+
+    async def call_curator(prompt, step_name):
+        return await generate_content_with_retry(
+            curator_client,
+            curator_model["model"],
+            prompt,
+            conf,
+            int(conf.get("operator_curator_max_output_tokens", 4000)),
             step_name,
         )
 
@@ -362,12 +392,16 @@ async def _run(args):
             "selection": "contiguous dataset order; identical to direct plausible-set baseline",
             "seed": int(conf.get("seed", 45)),
             "shuffle_seed": int(conf.get("shuffle_seed", 41)),
-            "strategies_per_sample": 3,
-            "llm_calls_per_sample": 2,
+            "strategies_per_sample": strategy_count,
+            "llm_calls_per_sample": 3,
             "max_concurrent_samples": concurrency,
-            "context_rendering": "all generated sources/text contexts unchanged",
+            "context_rendering": (
+                "candidate-local bundle-completion explanations; selected strategy "
+                "results retained internally for traceability"
+            ),
             "resumed": bool(args.resume),
             "generation_model": generation_model,
+            "curator_model": curator_model,
             "prediction_model": prediction_model,
         },
     )
@@ -380,12 +414,20 @@ async def _run(args):
     )
     print(
         f">>> LLM1: {generation_model['provider']} / "
-        f"{generation_model['model']} (3 intent/spec/code programs)"
+        f"{generation_model['model']} "
+        f"({strategy_count} intent/spec/code programs)"
     )
-    print(">>> Runtime: guarded subprocess execution of three programs")
     print(
-        f">>> LLM2: {prediction_model['provider']} / "
-        f"{prediction_model['model']} (evidence-grounded full ranking)"
+        f">>> Runtime: guarded subprocess execution of "
+        f"{strategy_count} generated programs"
+    )
+    print(
+        f">>> LLM2: {curator_model['provider']} / "
+        f"{curator_model['model']} (semantic evidence curation)"
+    )
+    print(
+        f">>> LLM3: {prediction_model['provider']} / "
+        f"{prediction_model['model']} (completion-explanation full ranking)"
     )
     print(f">>> Maximum concurrent samples: {concurrency}")
 
@@ -408,7 +450,7 @@ async def _run(args):
                 case,
                 capabilities,
                 [],
-                3,
+                strategy_count,
                 text_only=False,
             )
             _write_json(
@@ -430,7 +472,7 @@ async def _run(args):
             parsed1 = parse_json_from_text(raw1)
             induction_issues = validate_induction_result(
                 parsed1,
-                expected_count=3,
+                expected_count=strategy_count,
                 allowed_source_names=allowed_sources,
             )
             _write_text(os.path.join(case_dir, "llm1", "output.txt"), raw1)
@@ -469,7 +511,9 @@ async def _run(args):
                 report for report in execution_reports if report.get("success")
             ]
             if not successful:
-                raise RuntimeError("all three generated programs failed")
+                raise RuntimeError(
+                    f"all {strategy_count} generated programs failed"
+                )
 
             labels = [
                 str(candidate["label"]) for candidate in case["candidate_items"]
@@ -492,28 +536,101 @@ async def _run(args):
                 os.path.join(case_dir, "rendered_strategy_evidence.json"),
                 strategy_evidence,
             )
-            prompt2 = strategy_evidence_prediction_prompt(
+            max_selected_strategies = int(
+                conf.get("operator_curator_max_selected_strategies", 3)
+            )
+            curator_prompt = evidence_curator_prompt(
+                partial_items=case["partial_items"],
+                candidate_items=case["candidate_items"],
+                strategy_specs=parsed1["strategy_specs"],
+                strategy_evidence=strategy_evidence,
+                max_selected_strategies=max_selected_strategies,
+            )
+            _write_text(
+                os.path.join(case_dir, "curator", "input.txt"),
+                curator_prompt,
+            )
+            async with semaphore:
+                curator_raw = await call_curator(
+                    curator_prompt,
+                    f"evidence curation for {case['case_id']}",
+                )
+            llm_calls += 1
+            curator_result = normalize_evidence_curation(
+                parse_json_from_text(curator_raw)
+            )
+            curator_issues = validate_evidence_curation(
+                curator_result,
+                strategy_evidence=strategy_evidence,
+                candidate_labels=labels,
+                max_selected_strategies=max_selected_strategies,
+            )
+            _write_text(
+                os.path.join(case_dir, "curator", "output.txt"),
+                curator_raw,
+            )
+            _write_json(
+                os.path.join(case_dir, "curator", "parsed_response.json"),
+                curator_result,
+            )
+            _write_json(
+                os.path.join(case_dir, "curator", "validation_issues.json"),
+                curator_issues,
+            )
+            if curator_issues:
+                raise ValueError(
+                    "invalid evidence curation: " + " | ".join(curator_issues)
+                )
+            curated_strategy_evidence = select_curated_strategy_evidence(
+                strategy_evidence,
+                curator_result,
+            )
+            _write_json(
+                os.path.join(case_dir, "curated_strategy_evidence.json"),
+                curated_strategy_evidence,
+            )
+            explanations = candidate_completion_explanations(
+                curator_result
+            )
+            _write_json(
+                os.path.join(
+                    case_dir,
+                    "candidate_completion_explanations.json",
+                ),
+                explanations,
+            )
+            prediction_prompt = candidate_summary_prediction_prompt(
                 dataset=case["dataset"],
                 partial_items=case["partial_items"],
                 candidate_items=case["candidate_items"],
-                strategy_evidence=strategy_evidence,
+                candidate_summaries=explanations,
+                evidence_mode="completion_explanation",
             )
-            _write_text(os.path.join(case_dir, "llm2", "input.txt"), prompt2)
+            _write_text(
+                os.path.join(case_dir, "prediction", "input.txt"),
+                prediction_prompt,
+            )
             async with semaphore:
-                raw2 = await call_prediction(
-                    prompt2,
+                prediction_raw = await call_prediction(
+                    prediction_prompt,
                     f"spec-first prediction for {case['case_id']}",
                 )
             llm_calls += 1
-            parsed2 = parse_json_from_text(raw2)
-            prediction_issues = validate_prediction_result(parsed2, labels)
-            _write_text(os.path.join(case_dir, "llm2", "output.txt"), raw2)
-            _write_json(
-                os.path.join(case_dir, "llm2", "parsed_response.json"),
-                parsed2,
+            prediction_result = parse_json_from_text(prediction_raw)
+            prediction_issues = validate_prediction_result(
+                prediction_result,
+                labels,
+            )
+            _write_text(
+                os.path.join(case_dir, "prediction", "output.txt"),
+                prediction_raw,
             )
             _write_json(
-                os.path.join(case_dir, "llm2", "validation_issues.json"),
+                os.path.join(case_dir, "prediction", "parsed_response.json"),
+                prediction_result,
+            )
+            _write_json(
+                os.path.join(case_dir, "prediction", "validation_issues.json"),
                 prediction_issues,
             )
             if prediction_issues:
@@ -522,12 +639,17 @@ async def _run(args):
                 )
 
             evaluation = evaluate_full_ranking(
-                parsed2,
+                prediction_result,
                 str(sample["true_option_char"]),
+            )
+            raw_context_count = sum(
+                len(candidate.get("contexts", []))
+                for evidence in strategy_evidence
+                for candidate in evidence.get("candidate_evidence", [])
             )
             context_count = sum(
                 len(candidate.get("contexts", []))
-                for evidence in strategy_evidence
+                for evidence in curated_strategy_evidence
                 for candidate in evidence.get("candidate_evidence", [])
             )
             row = {
@@ -536,6 +658,10 @@ async def _run(args):
                 "candidate_count": len(labels),
                 "strategy_count": len(strategies),
                 "successful_program_count": len(successful),
+                "selected_strategy_count": len(
+                    curator_result["selected_strategies"]
+                ),
+                "raw_evidence_context_count": raw_context_count,
                 "evidence_context_count": context_count,
                 **evaluation,
                 "llm_calls": llm_calls,
@@ -564,7 +690,7 @@ async def _run(args):
             else (
                 f"pred={row['prediction']} true={row['true_label']} "
                 f"GT-rank={row['gt_rank']} programs="
-                f"{row['successful_program_count']}/3"
+                f"{row['successful_program_count']}/{strategy_count}"
             )
         )
         print(
